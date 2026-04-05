@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
 
@@ -22,8 +22,6 @@ class User(Base):
     avatar_url: Mapped[str | None] = mapped_column(String(500), default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
-    conversations: Mapped[list["Conversation"]] = relationship(back_populates="user", cascade="all, delete-orphan")
-
 
 class EmailVerificationToken(Base):
     __tablename__ = "email_verification_tokens"
@@ -38,9 +36,6 @@ class EmailVerificationToken(Base):
 
 
 class RefreshToken(Base):
-    """
-    Refresh JWT 的 jti（唯一标识）做 sha256 存库，用于撤销/登出/轮换。
-    """
     __tablename__ = "refresh_tokens"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
@@ -50,32 +45,3 @@ class RefreshToken(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-
-class Conversation(Base):
-    __tablename__ = "conversations"
-
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    user_id: Mapped[str] = mapped_column(String(32), ForeignKey("users.id"), index=True)
-
-    title: Mapped[str] = mapped_column(String(200), default="New chat")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-    user: Mapped["User"] = relationship(back_populates="conversations")
-    messages: Mapped[list["Message"]] = relationship(back_populates="conversation", cascade="all, delete-orphan")
-
-
-class Message(Base):
-    __tablename__ = "messages"
-
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    conversation_id: Mapped[str] = mapped_column(String(32), ForeignKey("conversations.id"), index=True)
-
-    role: Mapped[str] = mapped_column(String(16))  # system/user/assistant
-    content: Mapped[str] = mapped_column(Text, default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-    meta_json: Mapped[str] = mapped_column(Text, default="{}")
-
-    conversation: Mapped["Conversation"] = relationship(back_populates="messages")
