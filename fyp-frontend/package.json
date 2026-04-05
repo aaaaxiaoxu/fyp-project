@@ -1,0 +1,32 @@
+{
+  "name": "fyp-frontend",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "nuxt build",
+    "dev": "nuxt dev",
+    "generate": "nuxt generate",
+    "preview": "nuxt preview",
+    "postinstall": "nuxt prepare"
+  },
+  "dependencies": {
+    "@mdi/font": "^7.4.47",
+    "@pinia/nuxt": "^0.11.3",
+    "@vueuse/motion": "^3.0.3",
+    "cytoscape": "^3.33.1",
+    "nuxt": "^4.2.2",
+    "pinia": "^3.0.4",
+    "vite-plugin-vuetify": "^2.1.2",
+    "vue": "^3.5.25",
+    "vue-router": "^4.6.4",
+    "vuetify": "^3.11.4"
+  },
+  "devDependencies": {
+    "@nuxtjs/tailwindcss": "^6.14.0",
+    "@types/node": "^25.0.3",
+    "autoprefixer": "^10.4.23",
+    "postcss": "^8.5.6",
+    "sass-embedded": "^1.97.0",
+    "tailwindcss": "^3.4.14"
+  }
+}
