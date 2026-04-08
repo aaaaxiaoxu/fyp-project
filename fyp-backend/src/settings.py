@@ -9,8 +9,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 class Settings(BaseSettings):
     APP_BASE_URL: str = "http://127.0.0.1:8000"
 
-    SQLITE_PATH: str = "data/app.db"
-    SQLITE_ECHO: bool = False
+    DATABASE_URL: str = ""
+    MYSQL_HOST: str = "127.0.0.1"
+    MYSQL_PORT: int = 3307
+    MYSQL_DATABASE: str = "fyp_app"
+    MYSQL_USER: str = "fyp_user"
+    MYSQL_PASSWORD: str = "fyp_password"
+    DB_ECHO: bool = False
 
     # JWT
     JWT_SECRET_KEY: str = "change_me"
