@@ -6,18 +6,20 @@ import re
 import traceback
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..adapters import TaskStateWriter
 from ..auth_deps import get_current_user, get_db
 from ..db import SessionLocal
 from ..models import Project, ProjectStatus, Task, TaskStatus, User
 from ..repositories import project_file_repo, project_repo, task_repo
 from ..settings import settings
-from ..services import OntologyGenerator, TextProcessor
+from ..services import GraphBuildResult, GraphBuilderService, OntologyGenerator, TextProcessor, ZepEntityReader
 from ..utils import FileParser, get_logger
 from ..utils.path_resolver import (
     as_upload_relative_path,
@@ -27,6 +29,7 @@ from ..utils.path_resolver import (
     project_extracted_text_path,
     project_ontology_path,
     project_original_dir,
+    resolve_upload_path,
 )
 
 router = APIRouter(tags=["Graph"])
@@ -87,6 +90,36 @@ class CreateOntologyTaskResponse(BaseModel):
     task_id: str
 
 
+class BuildGraphRequest(BaseModel):
+    project_id: str = Field(min_length=1)
+    graph_name: str | None = Field(default=None, max_length=255)
+    chunk_size: int = Field(default=settings.DEFAULT_CHUNK_SIZE, ge=100, le=10000)
+    chunk_overlap: int = Field(default=settings.DEFAULT_CHUNK_OVERLAP, ge=0, le=5000)
+    batch_size: int = Field(default=3, ge=1, le=20)
+
+    @field_validator("project_id")
+    @classmethod
+    def validate_project_id(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("must not be blank")
+        return stripped
+
+    @field_validator("graph_name")
+    @classmethod
+    def normalize_graph_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+    @model_validator(mode="after")
+    def validate_chunk_overlap(self) -> "BuildGraphRequest":
+        if self.chunk_overlap >= self.chunk_size:
+            raise ValueError("chunk_overlap must be smaller than chunk_size")
+        return self
+
+
 class GraphTaskResponse(BaseModel):
     task_id: str
     task_type: str
@@ -101,6 +134,58 @@ class GraphTaskResponse(BaseModel):
     error: str | None
     created_at: datetime
     updated_at: datetime
+
+
+class GraphDataNodeResponse(BaseModel):
+    uuid: str
+    name: str
+    labels: list[str]
+    summary: str
+    attributes: dict[str, Any]
+    created_at: str | None = None
+
+
+class GraphDataEdgeResponse(BaseModel):
+    uuid: str
+    name: str
+    fact: str
+    fact_type: str
+    source_node_uuid: str
+    target_node_uuid: str
+    source_node_name: str
+    target_node_name: str
+    attributes: dict[str, Any]
+    created_at: str | None = None
+    valid_at: str | None = None
+    invalid_at: str | None = None
+    expired_at: str | None = None
+    episodes: list[str]
+
+
+class GraphDataResponse(BaseModel):
+    graph_id: str
+    nodes: list[GraphDataNodeResponse]
+    edges: list[GraphDataEdgeResponse]
+    node_count: int
+    edge_count: int
+
+
+class GraphEntityResponse(BaseModel):
+    uuid: str
+    name: str
+    labels: list[str]
+    summary: str
+    attributes: dict[str, Any]
+    related_edges: list[dict[str, Any]]
+    related_nodes: list[dict[str, Any]]
+
+
+class GraphEntitiesResponse(BaseModel):
+    graph_id: str
+    entities: list[GraphEntityResponse]
+    entity_types: list[str]
+    total_count: int
+    filtered_count: int
 
 
 @router.post("/project", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
@@ -204,6 +289,65 @@ async def get_graph_task(
     return _to_graph_task_response(task)
 
 
+@router.post("/build", response_model=CreateOntologyTaskResponse, status_code=status.HTTP_202_ACCEPTED)
+async def build_graph(
+    req: BuildGraphRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> CreateOntologyTaskResponse:
+    project = await project_repo.get_project_by_id(db, req.project_id, user_id=current_user.id)
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    if not project.ontology_path or not project.extracted_text_path:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Project ontology is not ready",
+        )
+
+    task = await task_repo.create_task(
+        db,
+        id=_new_task_id(),
+        user_id=current_user.id,
+        project_id=req.project_id,
+        task_type="graph_build",
+        status=TaskStatus.PENDING.value,
+        progress=0,
+        message="queued",
+    )
+    _schedule_graph_build(
+        task_id=task.id,
+        user_id=current_user.id,
+        project_id=req.project_id,
+        graph_name=req.graph_name or project.name,
+        chunk_size=req.chunk_size,
+        chunk_overlap=req.chunk_overlap,
+        batch_size=req.batch_size,
+    )
+    return CreateOntologyTaskResponse(task_id=task.id)
+
+
+@router.get("/data/{graph_id}", response_model=GraphDataResponse)
+async def get_graph_data(
+    graph_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> GraphDataResponse:
+    await _get_owned_project_by_graph_id(db, graph_id, current_user.id)
+    data = await asyncio.to_thread(_get_graph_data_sync, graph_id)
+    return GraphDataResponse(**data)
+
+
+@router.get("/entities/{graph_id}", response_model=GraphEntitiesResponse)
+async def get_graph_entities(
+    graph_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> GraphEntitiesResponse:
+    await _get_owned_project_by_graph_id(db, graph_id, current_user.id)
+    payload = await asyncio.to_thread(_get_graph_entities_sync, graph_id)
+    return GraphEntitiesResponse(graph_id=graph_id, **payload)
+
+
 async def _read_upload_specs(files: list[UploadFile]) -> list[dict[str, str | bytes | int]]:
     upload_specs: list[dict[str, str | bytes | int]] = []
     for upload in files:
@@ -261,6 +405,31 @@ def _schedule_ontology_generation(
             simulation_requirement=simulation_requirement,
             additional_context=additional_context,
             uploads=uploads,
+        )
+    )
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_on_background_task_done)
+
+
+def _schedule_graph_build(
+    *,
+    task_id: str,
+    user_id: str,
+    project_id: str,
+    graph_name: str,
+    chunk_size: int,
+    chunk_overlap: int,
+    batch_size: int,
+) -> None:
+    task = asyncio.create_task(
+        _run_graph_build(
+            task_id=task_id,
+            user_id=user_id,
+            project_id=project_id,
+            graph_name=graph_name,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            batch_size=batch_size,
         )
     )
     _BACKGROUND_TASKS.add(task)
@@ -377,6 +546,102 @@ async def _run_ontology_generation(
         )
 
 
+async def _run_graph_build(
+    *,
+    task_id: str,
+    user_id: str,
+    project_id: str,
+    graph_name: str,
+    chunk_size: int,
+    chunk_overlap: int,
+    batch_size: int,
+) -> None:
+    try:
+        await _update_task_state(
+            task_id,
+            user_id=user_id,
+            status=TaskStatus.PROCESSING.value,
+            progress=5,
+            message="loading graph build inputs",
+            progress_detail_json={"stage": "load_inputs"},
+        )
+
+        async with SessionLocal() as session:
+            project = await project_repo.get_project_by_id(session, project_id, user_id=user_id)
+            if project is None:
+                raise RuntimeError("Project not found")
+            if not project.ontology_path or not project.extracted_text_path:
+                raise RuntimeError("Project ontology is not ready")
+
+            await project_repo.update_project(
+                session,
+                project_id,
+                user_id=user_id,
+                status=ProjectStatus.GRAPH_BUILDING.value,
+            )
+            ontology_path = resolve_upload_path(project.ontology_path)
+            extracted_text_path = resolve_upload_path(project.extracted_text_path)
+
+        ontology = await asyncio.to_thread(_read_json_file, ontology_path)
+        extracted_text = await asyncio.to_thread(_read_text_file, extracted_text_path)
+
+        result = await asyncio.to_thread(
+            _build_graph_sync,
+            task_id,
+            user_id,
+            extracted_text,
+            ontology,
+            graph_name,
+            chunk_size,
+            chunk_overlap,
+            batch_size,
+        )
+
+        result_json = {
+            "project_id": project_id,
+            "graph_id": result.graph_id,
+            "node_count": result.node_count,
+            "edge_count": result.edge_count,
+            "chunk_count": result.chunk_count,
+            "entity_types": result.entity_types,
+        }
+        async with SessionLocal() as session:
+            await project_repo.update_project(
+                session,
+                project_id,
+                user_id=user_id,
+                status=ProjectStatus.GRAPH_COMPLETED.value,
+                zep_graph_id=result.graph_id,
+            )
+
+        await _update_task_state(
+            task_id,
+            user_id=user_id,
+            status=TaskStatus.COMPLETED.value,
+            progress=100,
+            message="graph built",
+            result_json=result_json,
+            progress_detail_json={"stage": "completed", **result_json},
+            error=None,
+        )
+    except Exception as exc:
+        logger.exception("graph build failed")
+        async with SessionLocal() as session:
+            await project_repo.update_project(
+                session,
+                project_id,
+                user_id=user_id,
+                status=ProjectStatus.FAILED.value,
+            )
+        await _update_task_state(
+            task_id,
+            user_id=user_id,
+            status=TaskStatus.FAILED.value,
+            message="graph build failed",
+            error=f"{exc}\n{traceback.format_exc()}",
+        )
+
+
 async def _update_task_state(
     task_id: str,
     *,
@@ -405,6 +670,17 @@ async def _update_task_state(
         elif status == TaskStatus.COMPLETED.value:
             kwargs["error"] = None
         await task_repo.update_task(session, task_id, user_id=user_id, **kwargs)
+
+
+async def _get_owned_project_by_graph_id(
+    db: AsyncSession,
+    graph_id: str,
+    user_id: str,
+) -> Project:
+    project = await project_repo.get_project_by_graph_id(db, graph_id, user_id=user_id)
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Graph not found")
+    return project
 
 
 def _save_original_uploads(
@@ -477,6 +753,47 @@ def _generate_ontology_sync(
     )
 
 
+def _build_graph_sync(
+    task_id: str,
+    user_id: str,
+    text: str,
+    ontology: dict[str, Any],
+    graph_name: str,
+    chunk_size: int,
+    chunk_overlap: int,
+    batch_size: int,
+) -> GraphBuildResult:
+    writer = TaskStateWriter()
+
+    def progress_callback(progress: int, message: str, detail: dict[str, Any] | None = None) -> None:
+        if detail is None:
+            writer.set_processing(
+                task_id,
+                user_id=user_id,
+                progress=progress,
+                message=message,
+            )
+        else:
+            writer.set_processing(
+                task_id,
+                user_id=user_id,
+                progress=progress,
+                message=message,
+                progress_detail_json=detail,
+            )
+
+    builder = GraphBuilderService()
+    return builder.build_graph(
+        text=text,
+        ontology=ontology,
+        graph_name=graph_name,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        batch_size=batch_size,
+        progress_callback=progress_callback,
+    )
+
+
 def _write_text_file(path: Path, content: str) -> None:
     ensure_parent_directory(path)
     path.write_text(content, encoding="utf-8")
@@ -485,6 +802,27 @@ def _write_text_file(path: Path, content: str) -> None:
 def _write_json_file(path: Path, content: dict[str, object]) -> None:
     ensure_parent_directory(path)
     path.write_text(json.dumps(content, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _read_text_file(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def _read_json_file(path: Path) -> dict[str, Any]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("ontology file must contain a JSON object")
+    return data
+
+
+def _get_graph_data_sync(graph_id: str) -> dict[str, Any]:
+    reader = ZepEntityReader()
+    return reader.get_graph_data(graph_id)
+
+
+def _get_graph_entities_sync(graph_id: str) -> dict[str, Any]:
+    reader = ZepEntityReader()
+    return reader.filter_defined_entities(graph_id).to_dict()
 
 
 def _to_graph_task_response(task: Task) -> GraphTaskResponse:

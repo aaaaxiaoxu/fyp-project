@@ -117,9 +117,11 @@ class OntologyGenerator:
 
         entity_name_map: dict[str, str] = {}
         for entity in result["entity_types"]:
-            # some models return "type" instead of "name"
+            # some models return "type" or "label" instead of "name"
             if "name" not in entity and "type" in entity:
                 entity["name"] = entity.pop("type")
+            elif "name" not in entity and "label" in entity:
+                entity["name"] = entity.pop("label")
             if "name" in entity:
                 original_name = str(entity["name"])
                 entity["name"] = _to_pascal_case(original_name)
@@ -131,9 +133,11 @@ class OntologyGenerator:
                 entity["description"] = f"{description[:97]}..."
 
         for edge in result["edge_types"]:
-            # some models return "type" instead of "name"
+            # some models return "type" or "label" instead of "name"
             if "name" not in edge and "type" in edge:
                 edge["name"] = edge.pop("type")
+            elif "name" not in edge and "label" in edge:
+                edge["name"] = edge.pop("label")
             if "name" in edge:
                 edge["name"] = str(edge["name"]).upper()
             edge.setdefault("attributes", [])

@@ -62,6 +62,18 @@ async def list_projects_by_user(
     return list(await session.scalars(stmt))
 
 
+async def get_project_by_graph_id(
+    session: AsyncSession,
+    graph_id: str,
+    *,
+    user_id: str | None = None,
+) -> Project | None:
+    stmt = select(Project).where(Project.zep_graph_id == graph_id)
+    if user_id is not None:
+        stmt = stmt.where(Project.user_id == user_id)
+    return await session.scalar(stmt)
+
+
 async def update_project(
     session: AsyncSession,
     project_id: str,

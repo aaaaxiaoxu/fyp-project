@@ -6,6 +6,7 @@ from typing import Any
 
 from zep_cloud import InternalServerError
 from zep_cloud.client import Zep
+from zep_cloud.core.api_error import ApiError
 
 from .logger import get_logger
 
@@ -15,6 +16,7 @@ _DEFAULT_PAGE_SIZE = 100
 _MAX_NODES = 2000
 _DEFAULT_MAX_RETRIES = 3
 _DEFAULT_RETRY_DELAY = 2.0
+_MAX_RATE_LIMIT_WAIT = 120.0  # cap retry-after to 2 min
 
 
 def _fetch_page_with_retry(
@@ -34,6 +36,31 @@ def _fetch_page_with_retry(
     for attempt in range(max_retries):
         try:
             return api_call(*args, **kwargs)
+        except ApiError as exc:
+            if exc.status_code == 429:
+                # Respect Retry-After header if present, else use exponential backoff
+                retry_after_raw = (exc.headers or {}).get("retry-after") or (exc.headers or {}).get("Retry-After")
+                try:
+                    wait_s = min(float(retry_after_raw), _MAX_RATE_LIMIT_WAIT)
+                except (TypeError, ValueError):
+                    wait_s = min(delay, _MAX_RATE_LIMIT_WAIT)
+                logger.warning(
+                    "Zep %s rate limited (429), waiting %.0fs before retry (attempt %s/%s)",
+                    page_description, wait_s, attempt + 1, max_retries,
+                )
+                time.sleep(wait_s)
+                last_exception = exc
+                continue
+            last_exception = exc
+            if attempt < max_retries - 1:
+                logger.warning(
+                    "Zep %s attempt %s failed (HTTP %s): %s, retrying in %.1fs...",
+                    page_description, attempt + 1, exc.status_code, str(exc.body)[:100], delay,
+                )
+                time.sleep(delay)
+                delay *= 2
+            else:
+                logger.error("Zep %s failed after %s attempts: %s", page_description, max_retries, exc)
         except (ConnectionError, TimeoutError, OSError, InternalServerError) as exc:
             last_exception = exc
             if attempt < max_retries - 1:
