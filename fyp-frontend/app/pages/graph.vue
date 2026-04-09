@@ -501,7 +501,7 @@
                 </div>
 
                 <div class="card-content">
-                  <p class="api-note">NEXT → Task 8</p>
+                  <p class="api-note">NEXT → Task 9</p>
                   <p class="description">
                     Step 1 is done when project state, graph ID, and graph visualization can all be restored after refresh.
                   </p>
@@ -517,8 +517,12 @@
                     </div>
                   </div>
 
-                  <button class="action-btn" :disabled="currentPhase < 2">
-                    Environment Setup ➝
+                  <button
+                    class="action-btn"
+                    :disabled="currentPhase < 2 || !selectedProject"
+                    @click="router.push({ path: '/simulation', query: selectedProject ? { project: selectedProject.id } : {} })"
+                  >
+                    Open Step 2 ➝
                   </button>
                 </div>
               </div>

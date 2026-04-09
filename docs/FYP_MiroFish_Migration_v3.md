@@ -2,13 +2,14 @@
 
 > 本文档替代 v2，作为后续实施的正式基线版本。  
 > 核心原则：迁移 MiroFish 的核心业务逻辑，不迁移其原始 Flask + 文件状态架构。
+> 当前实施前提已调整为：单租户、无用户认证模块。文中历史性出现的 `user_id`、认证和权限描述，如未专门说明，均不再作为本阶段的功能前提。
 
 ---
 
 ## 一、项目总览
 
 基于 MiroFish 的核心能力，在 FYP 项目中实现多 Agent 社交模拟系统。  
-保留现有用户认证模块，新增四步主流程：
+当前按单租户模式实现四步主流程：
 
 | Step | 名称 | 功能 |
 |---|---|---|
@@ -22,9 +23,9 @@
 - 不做报告生成，不保留 `report_agent.py` 的分章节报告链路
 - Step 4 改为 `Explorer Agent`
 - 全部接口改写为 FastAPI
-- 状态、归属、任务索引统一纳入 FYP 的 MySQL 体系
+- 状态与任务索引统一纳入 FYP 的 MySQL 体系
 - 文件系统只存产物，不再作为主状态源
-- 前端页面壳、导航方式、工作区布局默认与 MiroFish 保持一致，不额外暴露头像、邮箱、Profile 一类 FYP 用户态 UI
+- 前端页面壳、导航方式、工作区布局默认与 MiroFish 保持一致，不额外暴露头像、邮箱、Profile 一类账户 UI
 
 ---
 
@@ -45,8 +46,8 @@
 不采用 sidecar 的原因：
 
 - 毕业项目需要体现自主架构整合，而不是外挂一个现成子系统
-- 用户、任务、项目、权限必须与 FYP 主系统统一
-- 后续前端流程与认证、历史记录、项目归属都要求单体一致
+- 项目、任务、模拟和 Explorer 能力都需要纳入 FYP 主系统统一编排
+- 后续前端流程、历史记录和状态恢复都要求单体一致
 
 ### 2.2 图谱方案
 
@@ -96,7 +97,7 @@
 采用 **混合存储**：
 
 - 文件系统：存产物
-- MySQL：存状态、索引、归属
+- MySQL：存状态与索引
 
 文件不是主状态真相。  
 DB 才是项目、任务、模拟、Explorer 会话的主状态源。
@@ -140,7 +141,7 @@ DB 才是项目、任务、模拟、Explorer 会话的主状态源。
 | `TaskManager` | 原实现为内存单例 | 改为 MySQL `tasks` 表 |
 | `SimulationManager` 中的状态落盘 | 原实现依赖 `state.json` | 改为 DB 记录状态，文件只存产物 |
 | `ReportAgent / ReportManager` | FYP 不做报告生成 | 改写为 `ExplorerAgent` |
-| 认证归属 | MiroFish 无用户概念 | 所有 project / simulation / task / explorer session 绑定 `user_id` |
+| 单租户适配 | MiroFish 无项目体系 | FYP 增加 `project / simulation / task / explorer session` 的数据库索引与恢复锚点 |
 | 前端页面 | MiroFish 是 Vue/Vite | 全部按 Nuxt 4 重写，但视觉、布局和交互默认对齐 MiroFish；能直接照抄的页面结构不重新设计 |
 
 ### 3.3 复用原则
@@ -160,7 +161,7 @@ DB 才是项目、任务、模拟、Explorer 会话的主状态源。
 
 补充说明：
 
-> 前端不属于“重新发明产品”的范围。实现方式要迁到 Nuxt 4，但默认产品风格、页面结构和交互骨架应尽量保持与 MiroFish 一致，只对 FYP 的用户归属、项目体系和状态恢复做必要适配。
+> 前端不属于“重新发明产品”的范围。实现方式要迁到 Nuxt 4，但默认产品风格、页面结构和交互骨架应尽量保持与 MiroFish 一致，只对 FYP 的项目体系和状态恢复做必要适配。
 
 ---
 
@@ -169,7 +170,7 @@ DB 才是项目、任务、模拟、Explorer 会话的主状态源。
 ### 4.1 设计原则
 
 - 文件系统存大对象与运行产物
-- MySQL 存状态、索引、关联关系与用户归属
+- MySQL 存状态、索引与关联关系
 - 文件路径通过 DB 元数据定位
 
 ### 4.2 文件系统结构
@@ -221,7 +222,6 @@ uploads/
 - 模拟状态
 - 长任务状态
 - Explorer 会话索引
-- 用户归属
 - 错误信息
 - 时间戳
 
@@ -229,7 +229,7 @@ uploads/
 
 ## 五、数据库表设计
 
-保留现有用户表不动，在 `models.py` 中新增：
+在 `models.py` 中新增：
 
 ### 5.1 Project
 
@@ -417,7 +417,6 @@ src/routers/
 ### 7.2 `main.py` 注册
 
 ```python
-app.include_router(auth_router,       prefix="/api/auth")
 app.include_router(graph_router,      prefix="/api/graph")
 app.include_router(simulation_router, prefix="/api/simulation")
 app.include_router(explorer_router,   prefix="/api/explorer")
@@ -429,7 +428,7 @@ app.include_router(explorer_router,   prefix="/api/explorer")
 |---|---|---|
 | POST | `/api/graph/project` | 创建项目并写入项目元信息 |
 | GET | `/api/graph/project/{project_id}` | 查询项目详情 |
-| GET | `/api/graph/projects` | 查询当前用户项目列表 |
+| GET | `/api/graph/projects` | 查询项目列表 |
 | DELETE | `/api/graph/project/{project_id}` | 删除项目 |
 | POST | `/api/graph/ontology/generate` | 向已有项目上传文件并生成本体，返回 `task_id` |
 | GET | `/api/graph/task/{task_id}` | 查询任务进度 |
@@ -458,6 +457,7 @@ app.include_router(explorer_router,   prefix="/api/explorer")
 | POST | `/api/simulation/prepare/{project_id}` | 生成人设与模拟配置，返回 `task_id` |
 | GET | `/api/simulation/prepare/status/{task_id}` | 查询 prepare 进度 |
 | GET | `/api/simulation/{simulation_id}/config` | 查看模拟配置 |
+| GET | `/api/simulation/{simulation_id}/profiles` | 查看 Agent 人设列表 |
 
 #### Step 3
 
@@ -553,7 +553,7 @@ Explorer Agent 初期保留以下工具：
 
 ### MVP-1：Step 1 Graph Build
 
-目标：用户能上传文档并完成图谱构建。
+目标：前端可上传文档并完成图谱构建。
 
 - 迁移 `ontology_generator.py`、`text_processor.py`、`graph_builder.py`
 - 重写 `graph.py` FastAPI router
@@ -570,7 +570,7 @@ Explorer Agent 初期保留以下工具：
 
 ### MVP-2：Step 2 Environment Setup
 
-目标：用户能看到实体、人设和模拟配置。
+目标：前端可看到实体、人设和模拟配置。
 
 - 迁移 `zep_entity_reader.py`
 - 迁移 `oasis_profile_generator.py`
@@ -582,7 +582,7 @@ Explorer Agent 初期保留以下工具：
 
 ### MVP-3：Step 3 Simulation
 
-目标：用户能启动模拟并实时看到 Agent 动作流。
+目标：前端可启动模拟并实时看到 Agent 动作流。
 
 - 迁移 `simulation_runner.py`
 - 迁移 `simulation_manager.py`
@@ -595,7 +595,7 @@ Explorer Agent 初期保留以下工具：
 
 ### MVP-4：Step 4 Explorer Agent
 
-目标：用户能对模拟世界提问，并采访 Agent。
+目标：前端可对模拟世界提问，并采访 Agent。
 
 - 迁移 `zep_tools.py`
 - 新建 `explorer_agent.py`

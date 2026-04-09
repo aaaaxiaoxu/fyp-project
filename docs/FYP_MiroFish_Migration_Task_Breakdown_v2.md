@@ -2,6 +2,7 @@
 
 > 本文档用于承接 [FYP_MiroFish_Migration_v3.md](/Users/xuliwei/github-project/fyp-project/docs/FYP_MiroFish_Migration_v3.md)，将设计方案拆解为可执行开发任务。
 > 本版本已修正任务归属不清、轮询接口缺失、工具类迁移遗漏、`interactive_ready` 写入责任不明确等问题。
+> 当前实施前提已调整为：单租户、无用户认证模块。文中所有用户归属、鉴权和多用户隔离要求均以“非必需”处理，不再作为本阶段验收前提。
 
 ---
 
@@ -29,7 +30,7 @@
 - FastAPI 是唯一对外 API 层
 - MySQL 是唯一主状态源
 - `uploads/` 只存大文件和运行产物，不作为主状态真相
-- 所有 `project / simulation / task / explorer_session` 均必须绑定 `user_id`
+- 当前阶段不引入用户认证与多用户隔离；`project / simulation / task / explorer_session` 按单租户模式运行
 
 ### 2.2 任务状态能力归属
 
@@ -63,12 +64,10 @@
 - 只要 MiroFish 现有页面结构、面板布局、信息层级、文案组织和交互流程可直接复用，就不要重新设计一套新风格
 - 前端允许的改动只应来自 FYP 的必要适配：
   - Nuxt 4 实现方式差异
-  - 登录态与 `user_id` 归属
   - `project_id / task_id / simulation_id` 恢复锚点
   - FYP 新增的项目列表、项目选择等 MiroFish 原本没有的能力
 - 前端不展示额外的 FYP 用户态 UI：
   - 不额外展示头像、昵称、邮箱、Profile、Sign out 等顶部账户模块
-  - 若认证仍然存在，应尽量收敛为路由守卫或独立认证页，不破坏 MiroFish 页面壳
 - Task 7 / Task 9 / Task 12 / Task 14 都必须明确说明所参考的 MiroFish 页面或组件
 - 若中间阶段为了先打通功能而存在临时样式，必须在 Task 14 做统一收口，最终整体前端风格须与 MiroFish 保持一致
 
@@ -132,7 +131,7 @@
   - `Simulation`
   - `Task`
   - `ExplorerSession`
-- 定义状态字段、时间戳、用户归属和外键关系
+- 定义状态字段、时间戳和外键关系
 - 明确关键状态枚举：
   - `projects.status`
   - `simulations.status`
@@ -151,7 +150,7 @@
 ### 验收标准
 
 - MySQL 中可见 `projects / project_files / simulations / tasks / explorer_sessions`
-- 能成功插入并查询带 `user_id` 的 `Project`、`Simulation`、`Task`
+- 能成功插入并查询 `Project`、`Simulation`、`Task`
 - `Simulation.interactive_ready` 字段存在，默认值为 `false`
 
 ---
@@ -176,7 +175,7 @@
 - 定义通用任务状态能力：
   - 创建任务
   - 更新 `status / progress / message / error / result_json`
-  - 按 `task_id + user_id` 查询任务
+  - 按 `task_id` 查询任务
 
 ### 主要输出
 
@@ -201,7 +200,7 @@
 
 ### 目标
 
-先打通 Step 1 的项目入口，建立项目元信息和后续文档处理的归属锚点。
+先打通 Step 1 的项目入口，建立项目元信息和后续文档处理的统一锚点。
 
 ### 工作内容
 
@@ -230,9 +229,8 @@
 
 ### 验收标准
 
-- 登录用户可创建、查看、列出、删除自己的项目
+- 可创建、查看、列出、删除项目
 - `POST /api/graph/project` 创建时可写入 `simulation_requirement`
-- 用户不能访问或删除他人的项目
 
 ---
 
@@ -276,7 +274,7 @@
 
 - `POST /api/graph/ontology/generate` 返回 `task_id`
 - `POST /api/graph/ontology/generate` 可接收 PDF / MD / TXT 并绑定到指定 `project_id`
-- `GET /api/graph/task/{task_id}` 返回 200，且只能查询当前用户任务
+- `GET /api/graph/task/{task_id}` 返回 200
 - 轮询过程中 `progress` 能从 0 逐步推进到 100
 - 原始文件已落到 `uploads/projects/{project_id}/original/`
 - `project_files` 表存在对应文件索引
@@ -323,7 +321,7 @@
 - 构建成功后 `projects.zep_graph_id` 已写入 DB
 - `GET /api/graph/data/{graph_id}` 返回节点与边
 - `GET /api/graph/entities/{graph_id}` 返回实体列表
-- 非项目所属用户无法读取对应图谱数据
+- 图谱查询结果与指定 `graph_id` 对应，返回结构稳定
 
 ---
 
@@ -407,7 +405,7 @@
 ### 验收标准
 
 - `POST /api/simulation/prepare/{project_id}` 返回 `task_id`
-- `GET /api/simulation/prepare/status/{task_id}` 返回 200，且只能查询当前用户任务
+- `GET /api/simulation/prepare/status/{task_id}` 返回 200
 - 轮询过程中 `progress` 能从 0 逐步推进到 100
 - 任务完成后存在：
   - `uploads/simulations/{simulation_id}/profiles/reddit_profiles.json`
@@ -430,6 +428,7 @@
 - 展示 Agent 人设卡片
 - 展示平台开关、轮次、配置摘要
 - 标出稳定 `agent_id`
+- 通过 `GET /api/simulation/{simulation_id}/profiles` 读取人设列表，用于恢复 Step 2 展示
 - 以前端结构对齐 MiroFish Step 2 为默认方案，优先复刻其信息编排、卡片样式和导航关系
 - 仅对 FYP 的字段名、接口返回结构和恢复锚点做必要适配，不重新设计新页面风格
 
@@ -635,18 +634,18 @@
   - `final_answer`
 - `POST /api/explorer/interview/{agent_id}` 在 `interactive_ready = true` 时可正常作答
 - `interactive_ready = false` 时接口返回明确拒绝信息
-- `GET /api/explorer/history/{simulation_id}` 可返回该用户的会话历史
+- `GET /api/explorer/history/{simulation_id}` 可返回该模拟的会话历史
 - 每次 `ask` / `interview` 后，对应 `session_id` 的 `.jsonl` 日志文件有新增轮次记录
 - `ExplorerSession.log_path` 已写入并可定位到对应 session 文件
 - 回答内容可引用 Zep 图谱 facts，而不是仅生成泛化答案
 
 ---
 
-## Task 14：Step 4 前端、端到端联调与权限收口
+## Task 14：Step 4 前端、端到端联调与状态收口
 
 ### 目标
 
-把 Step 4 真正接到产品流里，并完成全链路联调、失败态和权限校验。
+把 Step 4 真正接到产品流里，并完成全链路联调、失败态和状态校验。
 
 ### 工作内容
 
@@ -662,7 +661,7 @@
   - prepare
   - start simulation
   - Explorer ask / interview
-- 收口鉴权和归属校验
+- 收口路由状态、失败态与恢复逻辑
 
 ### 主要输出
 
@@ -679,9 +678,8 @@
 
 ### 验收标准
 
-- 登录用户可以从文档上传一路走到 Explorer 问答
+- 可从文档上传一路走到 Explorer 问答
 - 前端可以显示流式回答和工具调用过程
-- 不同用户之间无法访问彼此的项目、模拟和 Explorer 历史
 - 任一阶段失败时，前后端都能看到明确错误信息
 - 至少完成一条真实端到端演示链路
 - Task 7 / Task 9 / Task 12 / Task 14 最终页面在整体视觉、布局和交互上应统一对齐 MiroFish，仅保留 FYP 必要的业务适配差异
@@ -733,7 +731,7 @@
 
 ## 六、最终执行建议
 
-- 不要把“迁移 service”理解为“复制原项目文件”，必须同步完成 FYP 的 repo、router、用户归属和状态落库适配。
+- 不要把“迁移 service”理解为“复制原项目文件”，必须同步完成 FYP 的 repo、router 和状态落库适配。
 - 任何后台长任务都必须能在 DB 中看到进度和错误信息，不能只写日志文件。
 - 前端每个阶段都要以 `task_id` 或 `simulation_id` 作为恢复锚点，避免刷新后状态丢失。
 

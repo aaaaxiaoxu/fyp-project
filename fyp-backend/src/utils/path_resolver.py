@@ -80,6 +80,10 @@ def simulation_profiles_dir(simulation_id: str) -> Path:
     return simulation_path(simulation_id, "profiles")
 
 
+def simulation_profiles_path(simulation_id: str) -> Path:
+    return simulation_path(simulation_id, "profiles", "profiles.json")
+
+
 def simulation_reddit_profiles_path(simulation_id: str) -> Path:
     return simulation_path(simulation_id, "profiles", "reddit_profiles.json")
 

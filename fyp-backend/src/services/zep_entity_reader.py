@@ -32,6 +32,12 @@ class EntityNode:
             "related_nodes": [dict(item) for item in self.related_nodes],
         }
 
+    def get_entity_type(self) -> str | None:
+        for label in self.labels:
+            if label not in {"Entity", "Node"}:
+                return label
+        return None
+
 
 @dataclass(frozen=True, slots=True)
 class FilteredEntities:
@@ -114,6 +120,87 @@ class ZepEntityReader:
                 }
             )
         return edge_rows
+
+    def filter_from_data(
+        self,
+        nodes: list[dict[str, Any]],
+        edges: list[dict[str, Any]],
+        *,
+        defined_entity_types: list[str] | None = None,
+    ) -> FilteredEntities:
+        """Filter entities from pre-loaded node/edge data (avoids Zep API calls)."""
+        node_map = {node["uuid"]: node for node in nodes}
+        filtered_entities: list[EntityNode] = []
+        entity_types_found: set[str] = set()
+
+        for node in nodes:
+            custom_labels = [label for label in node["labels"] if label not in {"Entity", "Node"}]
+            if not custom_labels:
+                continue
+
+            if defined_entity_types is not None:
+                matching = [label for label in custom_labels if label in defined_entity_types]
+                if not matching:
+                    continue
+                entity_type = matching[0]
+            else:
+                entity_type = custom_labels[0]
+
+            entity_types_found.add(entity_type)
+            related_edges: list[dict[str, Any]] = []
+            related_node_uuids: set[str] = set()
+
+            for edge in edges:
+                if edge["source_node_uuid"] == node["uuid"]:
+                    related_edges.append(
+                        {
+                            "direction": "outgoing",
+                            "edge_name": edge["name"],
+                            "fact": edge["fact"],
+                            "target_node_uuid": edge["target_node_uuid"],
+                        }
+                    )
+                    related_node_uuids.add(edge["target_node_uuid"])
+                elif edge["target_node_uuid"] == node["uuid"]:
+                    related_edges.append(
+                        {
+                            "direction": "incoming",
+                            "edge_name": edge["name"],
+                            "fact": edge["fact"],
+                            "source_node_uuid": edge["source_node_uuid"],
+                        }
+                    )
+                    related_node_uuids.add(edge["source_node_uuid"])
+
+            related_nodes = [
+                {
+                    "uuid": node_map[related_uuid]["uuid"],
+                    "name": node_map[related_uuid]["name"],
+                    "labels": list(node_map[related_uuid]["labels"]),
+                    "summary": node_map[related_uuid]["summary"],
+                }
+                for related_uuid in related_node_uuids
+                if related_uuid in node_map
+            ]
+
+            filtered_entities.append(
+                EntityNode(
+                    uuid=node["uuid"],
+                    name=node["name"],
+                    labels=list(node["labels"]),
+                    summary=node["summary"],
+                    attributes=dict(node["attributes"]),
+                    related_edges=related_edges,
+                    related_nodes=related_nodes,
+                )
+            )
+
+        return FilteredEntities(
+            entities=filtered_entities,
+            entity_types=entity_types_found,
+            total_count=len(nodes),
+            filtered_count=len(filtered_entities),
+        )
 
     def filter_defined_entities(
         self,
