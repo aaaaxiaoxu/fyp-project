@@ -3,6 +3,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..db import SYSTEM_OWNER_ID
 from ..models import ExplorerSession, ExplorerSessionStatus
 from ..utils.path_resolver import as_upload_relative_path
 
@@ -14,7 +15,7 @@ async def create_explorer_session(
     *,
     id: str,
     simulation_id: str,
-    user_id: str,
+    user_id: str = SYSTEM_OWNER_ID,
     title: str,
     status: str = ExplorerSessionStatus.ACTIVE.value,
     log_path: str | None = None,
@@ -48,11 +49,13 @@ async def get_explorer_session_by_id(
 async def list_explorer_sessions(
     session: AsyncSession,
     *,
-    user_id: str,
+    user_id: str | None = None,
     simulation_id: str | None = None,
     status: str | None = None,
 ) -> list[ExplorerSession]:
-    stmt = select(ExplorerSession).where(ExplorerSession.user_id == user_id)
+    stmt = select(ExplorerSession)
+    if user_id is not None:
+        stmt = stmt.where(ExplorerSession.user_id == user_id)
     if simulation_id is not None:
         stmt = stmt.where(ExplorerSession.simulation_id == simulation_id)
     if status is not None:

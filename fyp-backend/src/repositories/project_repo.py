@@ -3,6 +3,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..db import SYSTEM_OWNER_ID
 from ..models import Project, ProjectStatus
 from ..utils.path_resolver import as_upload_relative_path
 
@@ -13,7 +14,7 @@ async def create_project(
     session: AsyncSession,
     *,
     id: str,
-    user_id: str,
+    user_id: str = SYSTEM_OWNER_ID,
     name: str,
     simulation_requirement: str,
     status: str = ProjectStatus.CREATED.value,
@@ -51,11 +52,13 @@ async def get_project_by_id(
 
 async def list_projects_by_user(
     session: AsyncSession,
-    user_id: str,
+    user_id: str | None = None,
     *,
     status: str | None = None,
 ) -> list[Project]:
-    stmt = select(Project).where(Project.user_id == user_id)
+    stmt = select(Project)
+    if user_id is not None:
+        stmt = stmt.where(Project.user_id == user_id)
     if status is not None:
         stmt = stmt.where(Project.status == status)
     stmt = stmt.order_by(Project.created_at.desc())

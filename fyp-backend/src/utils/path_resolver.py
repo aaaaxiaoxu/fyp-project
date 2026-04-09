@@ -55,6 +55,10 @@ def project_ontology_path(project_id: str) -> Path:
     return project_path(project_id, "ontology.json")
 
 
+def project_graph_data_path(project_id: str) -> Path:
+    return project_path(project_id, "graph_data.json")
+
+
 def simulation_path(simulation_id: str, *parts: str) -> Path:
     return _resolve_within(
         upload_root(),

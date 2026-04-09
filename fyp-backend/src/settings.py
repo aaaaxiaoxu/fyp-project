@@ -8,8 +8,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class Settings(BaseSettings):
-    APP_BASE_URL: str = "http://127.0.0.1:8000"
-
     DATABASE_URL: str = ""
     MYSQL_HOST: str = "127.0.0.1"
     MYSQL_PORT: int = 3307
@@ -17,23 +15,6 @@ class Settings(BaseSettings):
     MYSQL_USER: str = "fyp_user"
     MYSQL_PASSWORD: str = "fyp_password"
     DB_ECHO: bool = False
-
-    JWT_SECRET_KEY: str = "change_me"
-    JWT_ALG: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 20
-    REFRESH_TOKEN_EXPIRE_DAYS: int = 14
-
-    ACCESS_COOKIE_NAME: str = "access_token"
-    REFRESH_COOKIE_NAME: str = "refresh_token"
-    COOKIE_SECURE: bool = False
-    COOKIE_SAMESITE: str = "lax"
-
-    SMTP_HOST: str = ""
-    SMTP_PORT: int = 587
-    SMTP_USERNAME: str = ""
-    SMTP_PASSWORD: str = ""
-    SMTP_FROM: str = ""
-    SMTP_TLS: bool = True
 
     LLM_BASE_URL: str = "https://api.deepseek.com"
     LLM_API_KEY: str = ""

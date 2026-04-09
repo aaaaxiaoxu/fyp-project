@@ -3,6 +3,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..db import SYSTEM_OWNER_ID
 from ..models import Task, TaskStatus
 
 _UNSET = object()
@@ -12,7 +13,7 @@ async def create_task(
     session: AsyncSession,
     *,
     id: str,
-    user_id: str,
+    user_id: str = SYSTEM_OWNER_ID,
     task_type: str,
     project_id: str | None = None,
     simulation_id: str | None = None,
@@ -56,14 +57,16 @@ async def get_task_by_id(
 
 async def list_tasks_by_user(
     session: AsyncSession,
-    user_id: str,
+    user_id: str | None = None,
     *,
     project_id: str | None = None,
     simulation_id: str | None = None,
     task_type: str | None = None,
     status: str | None = None,
 ) -> list[Task]:
-    stmt = select(Task).where(Task.user_id == user_id)
+    stmt = select(Task)
+    if user_id is not None:
+        stmt = stmt.where(Task.user_id == user_id)
     if project_id is not None:
         stmt = stmt.where(Task.project_id == project_id)
     if simulation_id is not None:

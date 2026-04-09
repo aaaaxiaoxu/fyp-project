@@ -24,6 +24,7 @@
 - 全部接口改写为 FastAPI
 - 状态、归属、任务索引统一纳入 FYP 的 MySQL 体系
 - 文件系统只存产物，不再作为主状态源
+- 前端页面壳、导航方式、工作区布局默认与 MiroFish 保持一致，不额外暴露头像、邮箱、Profile 一类 FYP 用户态 UI
 
 ---
 
@@ -140,7 +141,7 @@ DB 才是项目、任务、模拟、Explorer 会话的主状态源。
 | `SimulationManager` 中的状态落盘 | 原实现依赖 `state.json` | 改为 DB 记录状态，文件只存产物 |
 | `ReportAgent / ReportManager` | FYP 不做报告生成 | 改写为 `ExplorerAgent` |
 | 认证归属 | MiroFish 无用户概念 | 所有 project / simulation / task / explorer session 绑定 `user_id` |
-| 前端页面 | MiroFish 是 Vue/Vite | 全部按 Nuxt 4 重写 |
+| 前端页面 | MiroFish 是 Vue/Vite | 全部按 Nuxt 4 重写，但视觉、布局和交互默认对齐 MiroFish；能直接照抄的页面结构不重新设计 |
 
 ### 3.3 复用原则
 
@@ -148,6 +149,7 @@ DB 才是项目、任务、模拟、Explorer 会话的主状态源。
 - prompt 可以迁
 - OASIS 运行脚本可以迁
 - 图谱检索工具可以迁
+- 前端页面的视觉风格、布局结构和交互方式可以迁
 - Flask API 不能迁
 - 内存任务管理不能迁
 - 文件状态管理不能迁
@@ -155,6 +157,10 @@ DB 才是项目、任务、模拟、Explorer 会话的主状态源。
 一句话：
 
 > 迁核心逻辑，不迁原始架构。
+
+补充说明：
+
+> 前端不属于“重新发明产品”的范围。实现方式要迁到 Nuxt 4，但默认产品风格、页面结构和交互骨架应尽量保持与 MiroFish 一致，只对 FYP 的用户归属、项目体系和状态恢复做必要适配。
 
 ---
 

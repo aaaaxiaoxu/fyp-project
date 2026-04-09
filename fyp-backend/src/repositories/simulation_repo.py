@@ -5,6 +5,7 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..db import SYSTEM_OWNER_ID
 from ..models import Simulation, SimulationStatus
 from ..utils.path_resolver import as_upload_relative_path
 
@@ -16,7 +17,7 @@ async def create_simulation(
     *,
     id: str,
     project_id: str,
-    user_id: str,
+    user_id: str = SYSTEM_OWNER_ID,
     twitter_enabled: bool,
     reddit_enabled: bool,
     status: str = SimulationStatus.CREATED.value,
@@ -69,12 +70,14 @@ async def get_simulation_by_id(
 
 async def list_simulations_by_user(
     session: AsyncSession,
-    user_id: str,
+    user_id: str | None = None,
     *,
     project_id: str | None = None,
     status: str | None = None,
 ) -> list[Simulation]:
-    stmt = select(Simulation).where(Simulation.user_id == user_id)
+    stmt = select(Simulation)
+    if user_id is not None:
+        stmt = stmt.where(Simulation.user_id == user_id)
     if project_id is not None:
         stmt = stmt.where(Simulation.project_id == project_id)
     if status is not None:

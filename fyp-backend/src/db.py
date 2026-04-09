@@ -6,6 +6,9 @@ from sqlalchemy.orm import DeclarativeBase
 
 from .settings import settings
 
+SYSTEM_OWNER_ID = "00000000000000000000000000000000"
+SYSTEM_OWNER_EMAIL = "system@local"
+
 
 class Base(DeclarativeBase):
     pass
@@ -32,7 +35,26 @@ engine = create_async_engine(
 SessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(bind=engine, expire_on_commit=False)
 
 
+async def get_db():
+    async with SessionLocal() as session:
+        yield session
+
+
 async def init_db() -> None:
     from . import models  # noqa: F401
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    async with SessionLocal() as session:
+        owner = await session.get(models.User, SYSTEM_OWNER_ID)
+        if owner is None:
+            session.add(
+                models.User(
+                    id=SYSTEM_OWNER_ID,
+                    email=SYSTEM_OWNER_EMAIL,
+                    password_hash="",
+                    is_verified=True,
+                    nickname="system",
+                    avatar_url=None,
+                )
+            )
+            await session.commit()

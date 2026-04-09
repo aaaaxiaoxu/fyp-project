@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -14,19 +15,19 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..adapters import TaskStateWriter
-from ..auth_deps import get_current_user, get_db
-from ..db import SessionLocal
-from ..models import Project, ProjectStatus, Task, TaskStatus, User
+from ..db import SessionLocal, get_db
+from ..models import Project, ProjectStatus, Task, TaskStatus
 from ..repositories import project_file_repo, project_repo, task_repo
 from ..settings import settings
 from ..services import GraphBuildResult, GraphBuilderService, OntologyGenerator, TextProcessor, ZepEntityReader
-from ..utils import FileParser, get_logger
+from ..utils import FileParser, ZepRateLimitExceeded, get_logger
 from ..utils.path_resolver import (
     as_upload_relative_path,
     ensure_directory,
     ensure_parent_directory,
     project_dir,
     project_extracted_text_path,
+    project_graph_data_path,
     project_ontology_path,
     project_original_dir,
     resolve_upload_path,
@@ -35,6 +36,7 @@ from ..utils.path_resolver import (
 router = APIRouter(tags=["Graph"])
 logger = get_logger("fyp.graph")
 _BACKGROUND_TASKS: set[asyncio.Task[None]] = set()
+_GRAPH_RATE_LIMIT_UNTIL: dict[str, float] = {}
 
 
 def _new_project_id() -> str:
@@ -66,7 +68,6 @@ class ProjectResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
-    user_id: str
     name: str
     status: str
     zep_graph_id: str | None
@@ -123,7 +124,6 @@ class BuildGraphRequest(BaseModel):
 class GraphTaskResponse(BaseModel):
     task_id: str
     task_type: str
-    user_id: str
     project_id: str | None
     simulation_id: str | None
     status: str
@@ -192,12 +192,10 @@ class GraphEntitiesResponse(BaseModel):
 async def create_project(
     req: CreateProjectRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
 ) -> Project:
     return await project_repo.create_project(
         db,
         id=_new_project_id(),
-        user_id=current_user.id,
         name=req.name,
         simulation_requirement=req.simulation_requirement,
     )
@@ -207,9 +205,8 @@ async def create_project(
 async def get_project(
     project_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
 ) -> Project:
-    project = await project_repo.get_project_by_id(db, project_id, user_id=current_user.id)
+    project = await project_repo.get_project_by_id(db, project_id)
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     return project
@@ -218,9 +215,8 @@ async def get_project(
 @router.get("/projects", response_model=ProjectListResponse)
 async def list_projects(
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
 ) -> ProjectListResponse:
-    projects = await project_repo.list_projects_by_user(db, current_user.id)
+    projects = await project_repo.list_projects_by_user(db, None)
     return ProjectListResponse(projects=projects)
 
 
@@ -228,9 +224,8 @@ async def list_projects(
 async def delete_project(
     project_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
 ) -> DeleteProjectResponse:
-    deleted = await project_repo.delete_project(db, project_id, user_id=current_user.id)
+    deleted = await project_repo.delete_project(db, project_id)
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     return DeleteProjectResponse(ok=True, project_id=project_id)
@@ -246,9 +241,8 @@ async def generate_ontology(
     files: list[UploadFile] = File(...),
     additional_context: str | None = Form(default=None),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
 ) -> CreateOntologyTaskResponse:
-    project = await project_repo.get_project_by_id(db, project_id, user_id=current_user.id)
+    project = await project_repo.get_project_by_id(db, project_id)
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
@@ -259,7 +253,6 @@ async def generate_ontology(
     task = await task_repo.create_task(
         db,
         id=_new_task_id(),
-        user_id=current_user.id,
         project_id=project_id,
         task_type="ontology_generate",
         status=TaskStatus.PENDING.value,
@@ -268,7 +261,6 @@ async def generate_ontology(
     )
     _schedule_ontology_generation(
         task_id=task.id,
-        user_id=current_user.id,
         project_id=project_id,
         simulation_requirement=project.simulation_requirement,
         additional_context=additional_context.strip() if additional_context else None,
@@ -281,9 +273,8 @@ async def generate_ontology(
 async def get_graph_task(
     task_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
 ) -> GraphTaskResponse:
-    task = await task_repo.get_task_by_id(db, task_id, user_id=current_user.id)
+    task = await task_repo.get_task_by_id(db, task_id)
     if task is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
     return _to_graph_task_response(task)
@@ -293,9 +284,8 @@ async def get_graph_task(
 async def build_graph(
     req: BuildGraphRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
 ) -> CreateOntologyTaskResponse:
-    project = await project_repo.get_project_by_id(db, req.project_id, user_id=current_user.id)
+    project = await project_repo.get_project_by_id(db, req.project_id)
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     if not project.ontology_path or not project.extracted_text_path:
@@ -307,7 +297,6 @@ async def build_graph(
     task = await task_repo.create_task(
         db,
         id=_new_task_id(),
-        user_id=current_user.id,
         project_id=req.project_id,
         task_type="graph_build",
         status=TaskStatus.PENDING.value,
@@ -316,7 +305,6 @@ async def build_graph(
     )
     _schedule_graph_build(
         task_id=task.id,
-        user_id=current_user.id,
         project_id=req.project_id,
         graph_name=req.graph_name or project.name,
         chunk_size=req.chunk_size,
@@ -329,22 +317,55 @@ async def build_graph(
 @router.get("/data/{graph_id}", response_model=GraphDataResponse)
 async def get_graph_data(
     graph_id: str,
+    refresh: bool = False,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
 ) -> GraphDataResponse:
-    await _get_owned_project_by_graph_id(db, graph_id, current_user.id)
-    data = await asyncio.to_thread(_get_graph_data_sync, graph_id)
+    project = await _get_owned_project_by_graph_id(db, graph_id)
+    data = await _load_graph_data_with_cache(project.id, graph_id, refresh=refresh)
     return GraphDataResponse(**data)
 
 
 @router.get("/entities/{graph_id}", response_model=GraphEntitiesResponse)
 async def get_graph_entities(
     graph_id: str,
+    refresh: bool = False,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
 ) -> GraphEntitiesResponse:
-    await _get_owned_project_by_graph_id(db, graph_id, current_user.id)
-    payload = await asyncio.to_thread(_get_graph_entities_sync, graph_id)
+    project = await _get_owned_project_by_graph_id(db, graph_id)
+    cache_path = project_graph_data_path(project.id)
+    cached_graph = await asyncio.to_thread(_read_graph_cache_file, cache_path)
+    cooldown_remaining = _graph_rate_limit_remaining(graph_id)
+    if cached_graph is not None and not refresh:
+        payload = _build_graph_entities_payload(cached_graph)
+        return GraphEntitiesResponse(graph_id=graph_id, **payload)
+
+    if cooldown_remaining > 0:
+        if cached_graph is not None:
+            payload = _build_graph_entities_payload(cached_graph)
+            return GraphEntitiesResponse(graph_id=graph_id, **payload)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Zep graph preview is currently rate limited. Retry in about {cooldown_remaining} seconds.",
+        )
+
+    try:
+        payload = await asyncio.to_thread(_get_graph_entities_sync, graph_id)
+    except ZepRateLimitExceeded as exc:
+        _remember_graph_rate_limit(graph_id, exc.retry_after_seconds)
+        if cached_graph is not None:
+            logger.warning("graph entity refresh rate limited for %s, serving cached entity payload", graph_id)
+            payload = _build_graph_entities_payload(cached_graph)
+        else:
+            raise _build_zep_rate_limit_http_error(exc) from exc
+    except Exception as exc:
+        logger.exception("failed to load graph entities for %s", graph_id)
+        if cached_graph is not None:
+            payload = _build_graph_entities_payload(cached_graph)
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Failed to load graph entities from Zep.",
+            ) from exc
     return GraphEntitiesResponse(graph_id=graph_id, **payload)
 
 
@@ -391,7 +412,7 @@ def _validate_upload_filename(filename: str | None) -> str:
 def _schedule_ontology_generation(
     *,
     task_id: str,
-    user_id: str,
+    user_id: str | None = None,
     project_id: str,
     simulation_requirement: str,
     additional_context: str | None,
@@ -414,7 +435,7 @@ def _schedule_ontology_generation(
 def _schedule_graph_build(
     *,
     task_id: str,
-    user_id: str,
+    user_id: str | None = None,
     project_id: str,
     graph_name: str,
     chunk_size: int,
@@ -447,7 +468,7 @@ def _on_background_task_done(task: asyncio.Task[None]) -> None:
 async def _run_ontology_generation(
     *,
     task_id: str,
-    user_id: str,
+    user_id: str | None = None,
     project_id: str,
     simulation_requirement: str,
     additional_context: str | None,
@@ -549,7 +570,7 @@ async def _run_ontology_generation(
 async def _run_graph_build(
     *,
     task_id: str,
-    user_id: str,
+    user_id: str | None = None,
     project_id: str,
     graph_name: str,
     chunk_size: int,
@@ -614,6 +635,12 @@ async def _run_graph_build(
                 zep_graph_id=result.graph_id,
             )
 
+        if result.graph_data is not None:
+            try:
+                await asyncio.to_thread(_write_json_file, project_graph_data_path(project_id), result.graph_data)
+            except Exception:
+                logger.exception("failed to cache graph snapshot for project %s", project_id)
+
         await _update_task_state(
             task_id,
             user_id=user_id,
@@ -645,7 +672,7 @@ async def _run_graph_build(
 async def _update_task_state(
     task_id: str,
     *,
-    user_id: str,
+    user_id: str | None = None,
     status: str | None = None,
     progress: int | None = None,
     message: str | None = None,
@@ -675,7 +702,7 @@ async def _update_task_state(
 async def _get_owned_project_by_graph_id(
     db: AsyncSession,
     graph_id: str,
-    user_id: str,
+    user_id: str | None = None,
 ) -> Project:
     project = await project_repo.get_project_by_graph_id(db, graph_id, user_id=user_id)
     if project is None:
@@ -724,6 +751,33 @@ def _build_stored_filename(original_name: str, used_filenames: set[str]) -> str:
     return candidate
 
 
+def _build_zep_rate_limit_http_error(exc: ZepRateLimitExceeded) -> HTTPException:
+    detail = "Zep graph preview is currently rate limited."
+    if exc.retry_after_seconds is not None:
+        detail = f"{detail} Retry in about {int(exc.retry_after_seconds)} seconds."
+    return HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=detail)
+
+
+def _remember_graph_rate_limit(graph_id: str, retry_after_seconds: float | None) -> None:
+    wait_s = max(1.0, float(retry_after_seconds or 1.0))
+    _GRAPH_RATE_LIMIT_UNTIL[graph_id] = max(
+        _GRAPH_RATE_LIMIT_UNTIL.get(graph_id, 0.0),
+        time.monotonic() + wait_s,
+    )
+
+
+def _graph_rate_limit_remaining(graph_id: str) -> int:
+    until = _GRAPH_RATE_LIMIT_UNTIL.get(graph_id)
+    if until is None:
+        return 0
+
+    remaining = int(until - time.monotonic())
+    if remaining <= 0:
+        _GRAPH_RATE_LIMIT_UNTIL.pop(graph_id, None)
+        return 0
+    return remaining
+
+
 def _extract_and_preprocess_documents(file_paths: list[str]) -> dict[str, object]:
     document_texts: list[str] = []
     combined_parts: list[str] = []
@@ -755,7 +809,7 @@ def _generate_ontology_sync(
 
 def _build_graph_sync(
     task_id: str,
-    user_id: str,
+    user_id: str | None,
     text: str,
     ontology: dict[str, Any],
     graph_name: str,
@@ -815,6 +869,149 @@ def _read_json_file(path: Path) -> dict[str, Any]:
     return data
 
 
+def _read_graph_cache_file(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+
+    try:
+        data = _read_json_file(path)
+    except Exception as exc:
+        logger.warning("failed to read graph cache %s: %s", path, exc)
+        return None
+
+    required_keys = {"graph_id", "nodes", "edges", "node_count", "edge_count"}
+    if not required_keys.issubset(data):
+        logger.warning("graph cache file missing required keys: %s", path)
+        return None
+
+    return data
+
+
+async def _load_graph_data_with_cache(
+    project_id: str,
+    graph_id: str,
+    *,
+    refresh: bool = False,
+) -> dict[str, Any]:
+    cache_path = project_graph_data_path(project_id)
+    cached_graph = await asyncio.to_thread(_read_graph_cache_file, cache_path)
+    cooldown_remaining = _graph_rate_limit_remaining(graph_id)
+
+    if cached_graph is not None and not refresh:
+        return cached_graph
+
+    if cooldown_remaining > 0:
+        if cached_graph is not None:
+            logger.info("serving cached graph snapshot for %s during cooldown (%ss remaining)", graph_id, cooldown_remaining)
+            return cached_graph
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Zep graph preview is currently rate limited. Retry in about {cooldown_remaining} seconds.",
+        )
+
+    try:
+        graph_data = await asyncio.to_thread(_get_graph_data_sync, graph_id)
+    except ZepRateLimitExceeded as exc:
+        _remember_graph_rate_limit(graph_id, exc.retry_after_seconds)
+        if cached_graph is not None:
+            logger.warning("graph refresh rate limited for %s, serving cached snapshot", graph_id)
+            return cached_graph
+        raise _build_zep_rate_limit_http_error(exc) from exc
+    except Exception as exc:
+        logger.exception("failed to load graph data for %s", graph_id)
+        if cached_graph is not None:
+            return cached_graph
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to load graph data from Zep.",
+        ) from exc
+
+    try:
+        await asyncio.to_thread(_write_json_file, cache_path, graph_data)
+    except Exception:
+        logger.exception("failed to persist graph cache for project %s", project_id)
+
+    return graph_data
+
+
+def _build_graph_entities_payload(graph_data: dict[str, Any]) -> dict[str, Any]:
+    nodes = list(graph_data.get("nodes", []) or [])
+    edges = list(graph_data.get("edges", []) or [])
+    node_map = {
+        str(node.get("uuid", "") or ""): node
+        for node in nodes
+        if str(node.get("uuid", "") or "")
+    }
+
+    entities: list[dict[str, Any]] = []
+    entity_types: set[str] = set()
+    for node in nodes:
+        labels = [str(label) for label in (node.get("labels", []) or []) if str(label) not in {"Entity", "Node"}]
+        if not labels:
+            continue
+
+        entity_types.add(labels[0])
+        node_uuid = str(node.get("uuid", "") or "")
+        related_edges: list[dict[str, Any]] = []
+        related_node_uuids: set[str] = set()
+
+        for edge in edges:
+            source_uuid = str(edge.get("source_node_uuid", "") or "")
+            target_uuid = str(edge.get("target_node_uuid", "") or "")
+            if source_uuid == node_uuid:
+                related_edges.append(
+                    {
+                        "direction": "outgoing",
+                        "edge_name": str(edge.get("name", "") or ""),
+                        "fact": str(edge.get("fact", "") or ""),
+                        "target_node_uuid": target_uuid,
+                    }
+                )
+                if target_uuid:
+                    related_node_uuids.add(target_uuid)
+            elif target_uuid == node_uuid:
+                related_edges.append(
+                    {
+                        "direction": "incoming",
+                        "edge_name": str(edge.get("name", "") or ""),
+                        "fact": str(edge.get("fact", "") or ""),
+                        "source_node_uuid": source_uuid,
+                    }
+                )
+                if source_uuid:
+                    related_node_uuids.add(source_uuid)
+
+        related_nodes = [
+            {
+                "uuid": related_node["uuid"],
+                "name": related_node.get("name", "") or "",
+                "labels": list(related_node.get("labels", []) or []),
+                "summary": related_node.get("summary", "") or "",
+            }
+            for related_uuid in related_node_uuids
+            if (related_node := node_map.get(related_uuid)) is not None
+        ]
+
+        entities.append(
+            {
+                "uuid": node_uuid,
+                "name": str(node.get("name", "") or ""),
+                "labels": list(node.get("labels", []) or []),
+                "summary": str(node.get("summary", "") or ""),
+                "attributes": dict(node.get("attributes", {}) or {}),
+                "related_edges": related_edges,
+                "related_nodes": related_nodes,
+            }
+        )
+
+    return {
+        "entities": entities,
+        "entity_types": sorted(entity_types),
+        "total_count": len(nodes),
+        "filtered_count": len(entities),
+    }
+
+
 def _get_graph_data_sync(graph_id: str) -> dict[str, Any]:
     reader = ZepEntityReader()
     return reader.get_graph_data(graph_id)
@@ -829,7 +1026,6 @@ def _to_graph_task_response(task: Task) -> GraphTaskResponse:
     return GraphTaskResponse(
         task_id=task.id,
         task_type=task.task_type,
-        user_id=task.user_id,
         project_id=task.project_id,
         simulation_id=task.simulation_id,
         status=task.status,

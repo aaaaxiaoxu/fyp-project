@@ -6,7 +6,6 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .db import init_db
-from .auth_api import router as auth_router
 from .routers import graph_router
 from .settings import settings
 
@@ -29,5 +28,4 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(auth_router)
 app.include_router(graph_router, prefix="/api/graph")

@@ -29,6 +29,7 @@ class GraphBuildResult:
     edge_count: int
     entity_types: list[str]
     chunk_count: int
+    graph_data: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -168,6 +169,7 @@ class GraphBuilderService:
             edge_count=int(graph_data["edge_count"]),
             entity_types=entity_types,
             chunk_count=len(chunks),
+            graph_data=graph_data,
         )
 
     def create_graph(self, name: str) -> str:

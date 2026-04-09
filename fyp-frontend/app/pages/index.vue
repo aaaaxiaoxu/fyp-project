@@ -1,20 +1,41 @@
+<script setup lang="ts">
+import { navigateTo, useHead } from 'nuxt/app'
+
+useHead({
+  title: 'SocioGraph',
+})
+
+await navigateTo('/graph', { replace: true })
+</script>
+
 <template>
-  <v-app theme="dark">
-    <AppNavBar />
-    <v-main>
-      <v-container class="h-screen flex flex-col justify-center items-center text-center">
-        <h1 class="text-4xl font-bold mb-4">Welcome</h1>
-        <p class="text-gray-400 mb-8">Coming soon.</p>
-        <v-btn color="white" class="text-black" @click="router.push('/auth/login')">
-          Get Started
-        </v-btn>
-      </v-container>
-    </v-main>
-  </v-app>
+  <div class="redirect-shell">
+    <div class="redirect-mark">SOCIOGRAPH</div>
+    <div class="redirect-text">Opening workspace...</div>
+  </div>
 </template>
 
-<script setup lang="ts">
-import { useRouter } from 'vue-router'
+<style scoped>
+.redirect-shell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  background: #ffffff;
+  color: #111;
+  font-family: 'Space Grotesk', 'Noto Sans SC', system-ui, sans-serif;
+}
 
-const router = useRouter()
-</script>
+.redirect-mark {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: 0.24em;
+}
+
+.redirect-text {
+  margin-top: 10px;
+  font-size: 12px;
+  color: #777;
+  text-align: center;
+}
+</style>

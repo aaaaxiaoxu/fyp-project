@@ -17,6 +17,17 @@ _MAX_NODES = 2000
 _DEFAULT_MAX_RETRIES = 3
 _DEFAULT_RETRY_DELAY = 2.0
 _MAX_RATE_LIMIT_WAIT = 120.0  # cap retry-after to 2 min
+_MAX_INTERACTIVE_RATE_LIMIT_WAIT = 10.0
+
+
+class ZepRateLimitExceeded(RuntimeError):
+    def __init__(self, *, page_description: str, retry_after_seconds: float | None = None) -> None:
+        self.page_description = page_description
+        self.retry_after_seconds = retry_after_seconds
+        message = f"Zep rate limit exceeded while reading {page_description}"
+        if retry_after_seconds is not None:
+            message = f"{message}; retry after about {int(retry_after_seconds)}s"
+        super().__init__(message)
 
 
 def _fetch_page_with_retry(
@@ -38,15 +49,29 @@ def _fetch_page_with_retry(
             return api_call(*args, **kwargs)
         except ApiError as exc:
             if exc.status_code == 429:
-                # Respect Retry-After header if present, else use exponential backoff
                 retry_after_raw = (exc.headers or {}).get("retry-after") or (exc.headers or {}).get("Retry-After")
                 try:
                     wait_s = min(float(retry_after_raw), _MAX_RATE_LIMIT_WAIT)
                 except (TypeError, ValueError):
                     wait_s = min(delay, _MAX_RATE_LIMIT_WAIT)
+
+                if wait_s > _MAX_INTERACTIVE_RATE_LIMIT_WAIT or attempt >= max_retries - 1:
+                    logger.warning(
+                        "Zep %s rate limited (429), failing fast with retry-after %.0fs",
+                        page_description,
+                        wait_s,
+                    )
+                    raise ZepRateLimitExceeded(
+                        page_description=page_description,
+                        retry_after_seconds=wait_s,
+                    ) from exc
+
                 logger.warning(
                     "Zep %s rate limited (429), waiting %.0fs before retry (attempt %s/%s)",
-                    page_description, wait_s, attempt + 1, max_retries,
+                    page_description,
+                    wait_s,
+                    attempt + 1,
+                    max_retries,
                 )
                 time.sleep(wait_s)
                 last_exception = exc
