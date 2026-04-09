@@ -21,7 +21,10 @@ from ..services import (
     OasisAgentProfile,
     OasisProfileGenerator,
     SimulationConfigGenerator,
+    SimulationManager,
     SimulationParameters,
+    SimulationStartError,
+    SimulationStartResult,
     ZepEntityReader,
 )
 from ..utils import get_logger
@@ -41,6 +44,7 @@ from ..utils.path_resolver import (
 router = APIRouter(tags=["Simulation"])
 logger = get_logger("fyp.simulation")
 _BACKGROUND_TASKS: set[asyncio.Task[None]] = set()
+simulation_manager = SimulationManager()
 
 
 def _new_task_id() -> str:
@@ -92,6 +96,12 @@ class SimulationProfilesResponse(BaseModel):
     profiles: list[dict[str, Any]]
 
 
+class StartSimulationResponse(BaseModel):
+    simulation_id: str
+    status: str
+    pid: int
+
+
 @router.post(
     "/prepare/{project_id}",
     response_model=CreatePrepareTaskResponse,
@@ -137,6 +147,21 @@ async def prepare_simulation(
         reddit_enabled=request.reddit_enabled,
     )
     return CreatePrepareTaskResponse(task_id=task.id)
+
+
+@router.post(
+    "/start/{simulation_id}",
+    response_model=StartSimulationResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def start_simulation(
+    simulation_id: str,
+) -> StartSimulationResponse:
+    try:
+        result = await simulation_manager.start_simulation(simulation_id)
+    except SimulationStartError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    return _to_start_response(result)
 
 
 @router.get("/prepare/status/{task_id}", response_model=SimulationTaskResponse)
@@ -575,4 +600,12 @@ def _to_task_response(task: Task) -> SimulationTaskResponse:
         error=task.error,
         created_at=task.created_at,
         updated_at=task.updated_at,
+    )
+
+
+def _to_start_response(result: SimulationStartResult) -> StartSimulationResponse:
+    return StartSimulationResponse(
+        simulation_id=result.simulation_id,
+        status=result.status,
+        pid=result.pid,
     )
