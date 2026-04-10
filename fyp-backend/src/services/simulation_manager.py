@@ -217,134 +217,139 @@ class SimulationManager:
                 interactive_ready=False,
             )
 
-            for round_number in range(1, total_rounds + 1):
-                stop_requested = False
-                for command in ipc.consume_commands():
-                    if command.command == "stop":
-                        stop_requested = True
-                        ipc.write_response(
-                            command_id=command.command_id,
-                            payload={
-                                "simulation_id": simulation_id,
-                                "status": "accepted",
-                                "command": "stop",
-                            },
-                        )
+            try:
+                await runner.setup()
 
-                if stop_requested:
-                    interactive_ready = self._artifacts_complete(
-                        simulation_id,
-                        twitter_enabled=simulation.twitter_enabled,
-                        reddit_enabled=simulation.reddit_enabled,
-                    )
-                    await self._set_terminal_state(
-                        simulation_id,
-                        status=SimulationStatus.STOPPED.value,
-                        current_round=round_number - 1,
-                        twitter_actions_count=twitter_count,
-                        reddit_actions_count=reddit_count,
-                        interactive_ready=interactive_ready,
-                    )
+                for round_number in range(1, total_rounds + 1):
+                    stop_requested = False
+                    for command in ipc.consume_commands():
+                        if command.command == "stop":
+                            stop_requested = True
+                            ipc.write_response(
+                                command_id=command.command_id,
+                                payload={
+                                    "simulation_id": simulation_id,
+                                    "status": "accepted",
+                                    "command": "stop",
+                                },
+                            )
+
+                    if stop_requested:
+                        interactive_ready = self._artifacts_complete(
+                            simulation_id,
+                            twitter_enabled=simulation.twitter_enabled,
+                            reddit_enabled=simulation.reddit_enabled,
+                        )
+                        await self._set_terminal_state(
+                            simulation_id,
+                            status=SimulationStatus.STOPPED.value,
+                            current_round=round_number - 1,
+                            twitter_actions_count=twitter_count,
+                            reddit_actions_count=reddit_count,
+                            interactive_ready=interactive_ready,
+                        )
+                        ipc.write_run_state(
+                            {
+                                "simulation_id": simulation_id,
+                                "status": SimulationStatus.STOPPED.value,
+                                "current_round": round_number - 1,
+                                "total_rounds": total_rounds,
+                                "twitter_actions_count": twitter_count,
+                                "reddit_actions_count": reddit_count,
+                                "interactive_ready": interactive_ready,
+                            }
+                        )
+                        ipc.write_env_status(
+                            status=SimulationStatus.STOPPED.value,
+                            pid=os.getpid(),
+                            current_round=round_number - 1,
+                            total_rounds=total_rounds,
+                            twitter_actions_count=twitter_count,
+                            reddit_actions_count=reddit_count,
+                            interactive_ready=interactive_ready,
+                        )
+                        return
+
+                    round_result = await runner.execute_round(round_number)
+                    if round_result.twitter_actions:
+                        action_logger.append_actions("twitter", round_result.twitter_actions)
+                        twitter_count += len(round_result.twitter_actions)
+                    if round_result.reddit_actions:
+                        action_logger.append_actions("reddit", round_result.reddit_actions)
+                        reddit_count += len(round_result.reddit_actions)
+
+                    memory_summary = await memory_updater.record_round(round_number, round_result.all_actions)
                     ipc.write_run_state(
                         {
                             "simulation_id": simulation_id,
-                            "status": SimulationStatus.STOPPED.value,
-                            "current_round": round_number - 1,
+                            "status": SimulationStatus.RUNNING.value,
+                            "current_round": round_number,
                             "total_rounds": total_rounds,
                             "twitter_actions_count": twitter_count,
                             "reddit_actions_count": reddit_count,
-                            "interactive_ready": interactive_ready,
+                            "interactive_ready": False,
+                            "recent_actions": round_result.all_actions[-6:],
+                            "memory_update": memory_summary,
                         }
                     )
                     ipc.write_env_status(
-                        status=SimulationStatus.STOPPED.value,
+                        status=SimulationStatus.RUNNING.value,
                         pid=os.getpid(),
-                        current_round=round_number - 1,
+                        current_round=round_number,
                         total_rounds=total_rounds,
                         twitter_actions_count=twitter_count,
                         reddit_actions_count=reddit_count,
-                        interactive_ready=interactive_ready,
+                        interactive_ready=False,
                     )
-                    return
 
-                round_result = runner.execute_round(round_number)
-                if round_result.twitter_actions:
-                    action_logger.append_actions("twitter", round_result.twitter_actions)
-                    twitter_count += len(round_result.twitter_actions)
-                if round_result.reddit_actions:
-                    action_logger.append_actions("reddit", round_result.reddit_actions)
-                    reddit_count += len(round_result.reddit_actions)
+                    async with SessionLocal() as session:
+                        await simulation_repo.update_simulation(
+                            session,
+                            simulation_id,
+                            status=SimulationStatus.RUNNING.value,
+                            current_round=round_number,
+                            twitter_actions_count=twitter_count,
+                            reddit_actions_count=reddit_count,
+                            interactive_ready=False,
+                            error=None,
+                        )
+                    time.sleep(ROUND_DELAY_SECONDS)
 
-                memory_summary = memory_updater.record_round(round_number, round_result.all_actions)
+                interactive_ready = self._artifacts_complete(
+                    simulation_id,
+                    twitter_enabled=simulation.twitter_enabled,
+                    reddit_enabled=simulation.reddit_enabled,
+                )
+                await self._set_terminal_state(
+                    simulation_id,
+                    status=SimulationStatus.COMPLETED.value,
+                    current_round=total_rounds,
+                    twitter_actions_count=twitter_count,
+                    reddit_actions_count=reddit_count,
+                    interactive_ready=interactive_ready,
+                )
                 ipc.write_run_state(
                     {
                         "simulation_id": simulation_id,
-                        "status": SimulationStatus.RUNNING.value,
-                        "current_round": round_number,
+                        "status": SimulationStatus.COMPLETED.value,
+                        "current_round": total_rounds,
                         "total_rounds": total_rounds,
                         "twitter_actions_count": twitter_count,
                         "reddit_actions_count": reddit_count,
-                        "interactive_ready": False,
-                        "recent_actions": round_result.all_actions[-6:],
-                        "memory_update": memory_summary,
+                        "interactive_ready": interactive_ready,
                     }
                 )
                 ipc.write_env_status(
-                    status=SimulationStatus.RUNNING.value,
+                    status=SimulationStatus.COMPLETED.value,
                     pid=os.getpid(),
-                    current_round=round_number,
+                    current_round=total_rounds,
                     total_rounds=total_rounds,
                     twitter_actions_count=twitter_count,
                     reddit_actions_count=reddit_count,
-                    interactive_ready=False,
+                    interactive_ready=interactive_ready,
                 )
-
-                async with SessionLocal() as session:
-                    await simulation_repo.update_simulation(
-                        session,
-                        simulation_id,
-                        status=SimulationStatus.RUNNING.value,
-                        current_round=round_number,
-                        twitter_actions_count=twitter_count,
-                        reddit_actions_count=reddit_count,
-                        interactive_ready=False,
-                        error=None,
-                    )
-                time.sleep(ROUND_DELAY_SECONDS)
-
-            interactive_ready = self._artifacts_complete(
-                simulation_id,
-                twitter_enabled=simulation.twitter_enabled,
-                reddit_enabled=simulation.reddit_enabled,
-            )
-            await self._set_terminal_state(
-                simulation_id,
-                status=SimulationStatus.COMPLETED.value,
-                current_round=total_rounds,
-                twitter_actions_count=twitter_count,
-                reddit_actions_count=reddit_count,
-                interactive_ready=interactive_ready,
-            )
-            ipc.write_run_state(
-                {
-                    "simulation_id": simulation_id,
-                    "status": SimulationStatus.COMPLETED.value,
-                    "current_round": total_rounds,
-                    "total_rounds": total_rounds,
-                    "twitter_actions_count": twitter_count,
-                    "reddit_actions_count": reddit_count,
-                    "interactive_ready": interactive_ready,
-                }
-            )
-            ipc.write_env_status(
-                status=SimulationStatus.COMPLETED.value,
-                pid=os.getpid(),
-                current_round=total_rounds,
-                total_rounds=total_rounds,
-                twitter_actions_count=twitter_count,
-                reddit_actions_count=reddit_count,
-                interactive_ready=interactive_ready,
-            )
+            finally:
+                await runner.teardown()
         except Exception as exc:
             logger.exception("simulation process failed for %s", simulation_id)
             await self._mark_failed(simulation_id, f"{exc}\n{traceback.format_exc()}")
@@ -397,6 +402,20 @@ class SimulationManager:
                 completed_at=datetime.now(timezone.utc),
             )
 
+    async def _mark_failed_if_running(self, simulation_id: str, error: str) -> None:
+        async with SessionLocal() as session:
+            simulation = await simulation_repo.get_simulation_by_id(session, simulation_id)
+            if simulation is None or simulation.status != SimulationStatus.RUNNING.value:
+                return
+            await simulation_repo.update_simulation(
+                session,
+                simulation_id,
+                status=SimulationStatus.FAILED.value,
+                interactive_ready=False,
+                error=error,
+                completed_at=datetime.now(timezone.utc),
+            )
+
     def _spawn_subprocess(self, simulation_id: str) -> int:
         ensure_parent_directory(simulation_log_path(simulation_id))
         log_handle = simulation_log_path(simulation_id).open("a", encoding="utf-8")
@@ -430,8 +449,15 @@ class SimulationManager:
         process: subprocess.Popen[str],
         log_handle,
     ) -> None:
+        return_code: int | None = None
         try:
-            process.wait()
+            return_code = process.wait()
+            if return_code not in (None, 0):
+                error = f"Simulation subprocess exited with code {return_code}."
+                try:
+                    asyncio.run(self._mark_failed_if_running(simulation_id, error))
+                except Exception:
+                    logger.exception("failed to mark simulation %s failed after subprocess exit", simulation_id)
         finally:
             with _PROCESS_LOCK:
                 current = _RUNNING_PROCESSES.get(simulation_id)

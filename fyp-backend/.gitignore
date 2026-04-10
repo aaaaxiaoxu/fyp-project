@@ -2,6 +2,7 @@
 .env.*
 !.env.example
 logs/
+log/
 uploads/
 **/__pycache__/
 *.pyc

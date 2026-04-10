@@ -132,6 +132,14 @@ def simulation_reddit_database_path(simulation_id: str) -> Path:
     return simulation_path(simulation_id, "reddit_simulation.db")
 
 
+def simulation_oasis_twitter_db_path(simulation_id: str) -> Path:
+    return simulation_path(simulation_id, "oasis_twitter.db")
+
+
+def simulation_oasis_reddit_db_path(simulation_id: str) -> Path:
+    return simulation_path(simulation_id, "oasis_reddit.db")
+
+
 def explorer_path(simulation_id: str, *parts: str) -> Path:
     return _resolve_within(
         upload_root(),
