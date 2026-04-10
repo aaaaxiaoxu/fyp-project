@@ -3,7 +3,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models import Project, ProjectFile
+from ..models import ProjectFile
 from ..utils.path_resolver import as_upload_relative_path
 
 
@@ -34,24 +34,16 @@ async def create_project_file(
 async def get_project_file_by_id(
     session: AsyncSession,
     file_id: str,
-    *,
-    user_id: str | None = None,
 ) -> ProjectFile | None:
     stmt = select(ProjectFile).where(ProjectFile.id == file_id)
-    if user_id is not None:
-        stmt = stmt.join(Project, Project.id == ProjectFile.project_id).where(Project.user_id == user_id)
     return await session.scalar(stmt)
 
 
 async def list_project_files(
     session: AsyncSession,
     project_id: str,
-    *,
-    user_id: str | None = None,
 ) -> list[ProjectFile]:
     stmt = select(ProjectFile).where(ProjectFile.project_id == project_id)
-    if user_id is not None:
-        stmt = stmt.join(Project, Project.id == ProjectFile.project_id).where(Project.user_id == user_id)
     stmt = stmt.order_by(ProjectFile.created_at.asc())
     return list(await session.scalars(stmt))
 
@@ -59,10 +51,8 @@ async def list_project_files(
 async def delete_project_file(
     session: AsyncSession,
     file_id: str,
-    *,
-    user_id: str | None = None,
 ) -> bool:
-    project_file = await get_project_file_by_id(session, file_id, user_id=user_id)
+    project_file = await get_project_file_by_id(session, file_id)
     if project_file is None:
         return False
 

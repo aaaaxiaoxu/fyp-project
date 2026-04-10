@@ -59,47 +59,6 @@ class ExplorerSessionStatus(str, Enum):
     FAILED = "failed"
 
 
-class User(Base):
-    __tablename__ = "users"
-
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)  # uuid hex
-    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
-    password_hash: Mapped[str] = mapped_column(Text)
-    is_verified: Mapped[bool] = mapped_column(Boolean, default=False)
-    nickname: Mapped[str] = mapped_column(String(200), default="")
-    avatar_url: Mapped[str | None] = mapped_column(String(500), default=None)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-    projects: Mapped[list["Project"]] = relationship(back_populates="user")
-    simulations: Mapped[list["Simulation"]] = relationship(back_populates="user")
-    tasks: Mapped[list["Task"]] = relationship(back_populates="user")
-    explorer_sessions: Mapped[list["ExplorerSession"]] = relationship(back_populates="user")
-
-
-class EmailVerificationToken(Base):
-    __tablename__ = "email_verification_tokens"
-
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    user_id: Mapped[str] = mapped_column(String(32), ForeignKey("users.id"), index=True)
-
-    token_hash: Mapped[str] = mapped_column(String(64), index=True)  # sha256 hex
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-
-class RefreshToken(Base):
-    __tablename__ = "refresh_tokens"
-
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    user_id: Mapped[str] = mapped_column(String(32), ForeignKey("users.id"), index=True)
-
-    jti_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)  # sha256(jti)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-
 class Project(Base):
     __tablename__ = "projects"
     __table_args__ = (
@@ -107,7 +66,6 @@ class Project(Base):
     )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    user_id: Mapped[str] = mapped_column(String(32), ForeignKey("users.id"), index=True)
     name: Mapped[str] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(
         String(32),
@@ -122,7 +80,6 @@ class Project(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
-    user: Mapped[User] = relationship(back_populates="projects")
     files: Mapped[list["ProjectFile"]] = relationship(
         back_populates="project",
         cascade="all, delete-orphan",
@@ -163,7 +120,6 @@ class Simulation(Base):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     project_id: Mapped[str] = mapped_column(String(64), ForeignKey("projects.id"), index=True)
-    user_id: Mapped[str] = mapped_column(String(32), ForeignKey("users.id"), index=True)
     status: Mapped[str] = mapped_column(
         String(32),
         default=SimulationStatus.CREATED.value,
@@ -186,7 +142,6 @@ class Simulation(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
     project: Mapped[Project] = relationship(back_populates="simulations")
-    user: Mapped[User] = relationship(back_populates="simulations")
     tasks: Mapped[list["Task"]] = relationship(back_populates="simulation", passive_deletes=True)
     explorer_sessions: Mapped[list["ExplorerSession"]] = relationship(
         back_populates="simulation",
@@ -214,7 +169,6 @@ class Task(Base):
         index=True,
         default=None,
     )
-    user_id: Mapped[str] = mapped_column(String(32), ForeignKey("users.id"), index=True)
     task_type: Mapped[str] = mapped_column(String(64), index=True)
     status: Mapped[str] = mapped_column(
         String(32),
@@ -232,7 +186,6 @@ class Task(Base):
 
     project: Mapped[Project | None] = relationship(back_populates="tasks")
     simulation: Mapped[Simulation | None] = relationship(back_populates="tasks")
-    user: Mapped[User] = relationship(back_populates="tasks")
 
 
 class ExplorerSession(Base):
@@ -243,7 +196,6 @@ class ExplorerSession(Base):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     simulation_id: Mapped[str] = mapped_column(String(64), ForeignKey("simulations.id"), index=True)
-    user_id: Mapped[str] = mapped_column(String(32), ForeignKey("users.id"), index=True)
     title: Mapped[str] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(
         String(32),
@@ -256,4 +208,3 @@ class ExplorerSession(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
     simulation: Mapped[Simulation] = relationship(back_populates="explorer_sessions")
-    user: Mapped[User] = relationship(back_populates="explorer_sessions")

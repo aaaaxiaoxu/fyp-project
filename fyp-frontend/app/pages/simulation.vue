@@ -83,7 +83,7 @@
                   placeholder="Search name, @username, persona, topic, type"
                 />
                 <div class="toolbar-badges">
-                  <span class="badge pending">Stable agent_id: user_id</span>
+                  <span class="badge pending">Stable agent identifiers</span>
                   <span class="badge soft">Showing {{ filteredProfiles.length }} / {{ simulationProfiles.length }}</span>
                 </div>
               </div>
@@ -1108,12 +1108,6 @@ function summarizeError(error: string | null | undefined) {
 
 function normalizeApiError(error: unknown) {
   const message = getApiErrorMessage(error)
-  const lower = message.toLowerCase()
-
-  if (lower.includes('not logged in') || lower.includes('unauthorized') || lower.includes('forbidden')) {
-    return 'Backend still needs a restart to load the latest API changes.'
-  }
-
   return message
 }
 

@@ -3,7 +3,6 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db import SYSTEM_OWNER_ID
 from ..models import Task, TaskStatus
 
 _UNSET = object()
@@ -13,7 +12,6 @@ async def create_task(
     session: AsyncSession,
     *,
     id: str,
-    user_id: str = SYSTEM_OWNER_ID,
     task_type: str,
     project_id: str | None = None,
     simulation_id: str | None = None,
@@ -28,7 +26,6 @@ async def create_task(
         id=id,
         project_id=project_id,
         simulation_id=simulation_id,
-        user_id=user_id,
         task_type=task_type,
         status=status,
         progress=progress,
@@ -46,18 +43,13 @@ async def create_task(
 async def get_task_by_id(
     session: AsyncSession,
     task_id: str,
-    *,
-    user_id: str | None = None,
 ) -> Task | None:
     stmt = select(Task).where(Task.id == task_id)
-    if user_id is not None:
-        stmt = stmt.where(Task.user_id == user_id)
     return await session.scalar(stmt)
 
 
-async def list_tasks_by_user(
+async def list_tasks(
     session: AsyncSession,
-    user_id: str | None = None,
     *,
     project_id: str | None = None,
     simulation_id: str | None = None,
@@ -65,8 +57,6 @@ async def list_tasks_by_user(
     status: str | None = None,
 ) -> list[Task]:
     stmt = select(Task)
-    if user_id is not None:
-        stmt = stmt.where(Task.user_id == user_id)
     if project_id is not None:
         stmt = stmt.where(Task.project_id == project_id)
     if simulation_id is not None:
@@ -83,7 +73,6 @@ async def update_task(
     session: AsyncSession,
     task_id: str,
     *,
-    user_id: str | None = None,
     project_id: str | None | object = _UNSET,
     simulation_id: str | None | object = _UNSET,
     task_type: str | object = _UNSET,
@@ -94,7 +83,7 @@ async def update_task(
     progress_detail_json: dict | list | None | object = _UNSET,
     error: str | None | object = _UNSET,
 ) -> Task | None:
-    task = await get_task_by_id(session, task_id, user_id=user_id)
+    task = await get_task_by_id(session, task_id)
     if task is None:
         return None
 
@@ -125,10 +114,8 @@ async def update_task(
 async def delete_task(
     session: AsyncSession,
     task_id: str,
-    *,
-    user_id: str | None = None,
 ) -> bool:
-    task = await get_task_by_id(session, task_id, user_id=user_id)
+    task = await get_task_by_id(session, task_id)
     if task is None:
         return False
 

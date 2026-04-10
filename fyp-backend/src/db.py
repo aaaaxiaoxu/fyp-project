@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 from urllib.parse import quote_plus
+
+from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
 from .settings import settings
-
-SYSTEM_OWNER_ID = "00000000000000000000000000000000"
-SYSTEM_OWNER_EMAIL = "system@local"
 
 
 class Base(DeclarativeBase):
@@ -44,17 +43,36 @@ async def init_db() -> None:
     from . import models  # noqa: F401
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    async with SessionLocal() as session:
-        owner = await session.get(models.User, SYSTEM_OWNER_ID)
-        if owner is None:
-            session.add(
-                models.User(
-                    id=SYSTEM_OWNER_ID,
-                    email=SYSTEM_OWNER_EMAIL,
-                    password_hash="",
-                    is_verified=True,
-                    nickname="system",
-                    avatar_url=None,
+        await conn.run_sync(_drop_legacy_user_schema)
+
+
+def _drop_legacy_user_schema(sync_conn) -> None:
+    if sync_conn.dialect.name not in {"mysql", "mariadb"}:
+        return
+
+    inspector = inspect(sync_conn)
+    table_names = set(inspector.get_table_names())
+    quote = sync_conn.dialect.identifier_preparer.quote
+
+    for table_name in ("projects", "simulations", "tasks", "explorer_sessions"):
+        if table_name not in table_names:
+            continue
+        columns = {column["name"] for column in inspector.get_columns(table_name)}
+        if "user_id" not in columns:
+            continue
+
+        for foreign_key in inspector.get_foreign_keys(table_name):
+            constrained_columns = set(foreign_key.get("constrained_columns") or [])
+            foreign_key_name = foreign_key.get("name")
+            if "user_id" in constrained_columns and foreign_key_name:
+                sync_conn.execute(
+                    text(
+                        f"ALTER TABLE {quote(table_name)} "
+                        f"DROP FOREIGN KEY {quote(foreign_key_name)}"
+                    )
                 )
-            )
-            await session.commit()
+        sync_conn.execute(text(f"ALTER TABLE {quote(table_name)} DROP COLUMN {quote('user_id')}"))
+
+    for table_name in ("refresh_tokens", "email_verification_tokens", "users"):
+        if table_name in table_names:
+            sync_conn.execute(text(f"DROP TABLE IF EXISTS {quote(table_name)}"))

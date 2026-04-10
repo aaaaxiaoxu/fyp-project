@@ -238,7 +238,6 @@ async def _ensure_session(
         db,
         id=session_id,
         simulation_id=simulation.id,
-        user_id=simulation.user_id,
         title=title,
         log_path=log_path,
     )

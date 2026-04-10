@@ -216,7 +216,7 @@ async def get_project(
 async def list_projects(
     db: AsyncSession = Depends(get_db),
 ) -> ProjectListResponse:
-    projects = await project_repo.list_projects_by_user(db, None)
+    projects = await project_repo.list_projects(db)
     return ProjectListResponse(projects=projects)
 
 
@@ -412,7 +412,6 @@ def _validate_upload_filename(filename: str | None) -> str:
 def _schedule_ontology_generation(
     *,
     task_id: str,
-    user_id: str | None = None,
     project_id: str,
     simulation_requirement: str,
     additional_context: str | None,
@@ -421,7 +420,6 @@ def _schedule_ontology_generation(
     task = asyncio.create_task(
         _run_ontology_generation(
             task_id=task_id,
-            user_id=user_id,
             project_id=project_id,
             simulation_requirement=simulation_requirement,
             additional_context=additional_context,
@@ -435,7 +433,6 @@ def _schedule_ontology_generation(
 def _schedule_graph_build(
     *,
     task_id: str,
-    user_id: str | None = None,
     project_id: str,
     graph_name: str,
     chunk_size: int,
@@ -445,7 +442,6 @@ def _schedule_graph_build(
     task = asyncio.create_task(
         _run_graph_build(
             task_id=task_id,
-            user_id=user_id,
             project_id=project_id,
             graph_name=graph_name,
             chunk_size=chunk_size,
@@ -468,7 +464,6 @@ def _on_background_task_done(task: asyncio.Task[None]) -> None:
 async def _run_ontology_generation(
     *,
     task_id: str,
-    user_id: str | None = None,
     project_id: str,
     simulation_requirement: str,
     additional_context: str | None,
@@ -476,7 +471,7 @@ async def _run_ontology_generation(
 ) -> None:
     saved_paths: list[str] = []
     try:
-        await _update_task_state(task_id, user_id=user_id, status=TaskStatus.PROCESSING.value, progress=5, message="saving uploaded files")
+        await _update_task_state(task_id, status=TaskStatus.PROCESSING.value, progress=5, message="saving uploaded files")
         saved_files = await asyncio.to_thread(_save_original_uploads, project_id, uploads)
         saved_paths = [item["absolute_path"] for item in saved_files]
 
@@ -492,7 +487,7 @@ async def _run_ontology_generation(
                     size_bytes=item["size_bytes"],
                 )
 
-        await _update_task_state(task_id, user_id=user_id, progress=30, message="extracting document text")
+        await _update_task_state(task_id, progress=30, message="extracting document text")
         extracted = await asyncio.to_thread(_extract_and_preprocess_documents, saved_paths)
 
         extracted_text_path = project_extracted_text_path(project_id)
@@ -502,13 +497,11 @@ async def _run_ontology_generation(
             await project_repo.update_project(
                 session,
                 project_id,
-                user_id=user_id,
                 extracted_text_path=as_upload_relative_path(extracted_text_path),
             )
 
         await _update_task_state(
             task_id,
-            user_id=user_id,
             progress=70,
             message="generating ontology",
             progress_detail_json=extracted["stats"],
@@ -533,7 +526,6 @@ async def _run_ontology_generation(
             await project_repo.update_project(
                 session,
                 project_id,
-                user_id=user_id,
                 status=ProjectStatus.ONTOLOGY_GENERATED.value,
                 ontology_path=result_json["ontology_path"],
                 extracted_text_path=result_json["extracted_text_path"],
@@ -541,7 +533,6 @@ async def _run_ontology_generation(
 
         await _update_task_state(
             task_id,
-            user_id=user_id,
             status=TaskStatus.COMPLETED.value,
             progress=100,
             message="ontology generated",
@@ -555,12 +546,10 @@ async def _run_ontology_generation(
             await project_repo.update_project(
                 session,
                 project_id,
-                user_id=user_id,
                 status=ProjectStatus.FAILED.value,
             )
         await _update_task_state(
             task_id,
-            user_id=user_id,
             status=TaskStatus.FAILED.value,
             message="ontology generation failed",
             error=f"{exc}\n{traceback.format_exc()}",
@@ -570,7 +559,6 @@ async def _run_ontology_generation(
 async def _run_graph_build(
     *,
     task_id: str,
-    user_id: str | None = None,
     project_id: str,
     graph_name: str,
     chunk_size: int,
@@ -580,7 +568,6 @@ async def _run_graph_build(
     try:
         await _update_task_state(
             task_id,
-            user_id=user_id,
             status=TaskStatus.PROCESSING.value,
             progress=5,
             message="loading graph build inputs",
@@ -588,7 +575,7 @@ async def _run_graph_build(
         )
 
         async with SessionLocal() as session:
-            project = await project_repo.get_project_by_id(session, project_id, user_id=user_id)
+            project = await project_repo.get_project_by_id(session, project_id)
             if project is None:
                 raise RuntimeError("Project not found")
             if not project.ontology_path or not project.extracted_text_path:
@@ -597,7 +584,6 @@ async def _run_graph_build(
             await project_repo.update_project(
                 session,
                 project_id,
-                user_id=user_id,
                 status=ProjectStatus.GRAPH_BUILDING.value,
             )
             ontology_path = resolve_upload_path(project.ontology_path)
@@ -609,7 +595,6 @@ async def _run_graph_build(
         result = await asyncio.to_thread(
             _build_graph_sync,
             task_id,
-            user_id,
             extracted_text,
             ontology,
             graph_name,
@@ -630,7 +615,6 @@ async def _run_graph_build(
             await project_repo.update_project(
                 session,
                 project_id,
-                user_id=user_id,
                 status=ProjectStatus.GRAPH_COMPLETED.value,
                 zep_graph_id=result.graph_id,
             )
@@ -643,7 +627,6 @@ async def _run_graph_build(
 
         await _update_task_state(
             task_id,
-            user_id=user_id,
             status=TaskStatus.COMPLETED.value,
             progress=100,
             message="graph built",
@@ -657,12 +640,10 @@ async def _run_graph_build(
             await project_repo.update_project(
                 session,
                 project_id,
-                user_id=user_id,
                 status=ProjectStatus.FAILED.value,
             )
         await _update_task_state(
             task_id,
-            user_id=user_id,
             status=TaskStatus.FAILED.value,
             message="graph build failed",
             error=f"{exc}\n{traceback.format_exc()}",
@@ -672,7 +653,6 @@ async def _run_graph_build(
 async def _update_task_state(
     task_id: str,
     *,
-    user_id: str | None = None,
     status: str | None = None,
     progress: int | None = None,
     message: str | None = None,
@@ -696,15 +676,14 @@ async def _update_task_state(
             kwargs["error"] = error
         elif status == TaskStatus.COMPLETED.value:
             kwargs["error"] = None
-        await task_repo.update_task(session, task_id, user_id=user_id, **kwargs)
+        await task_repo.update_task(session, task_id, **kwargs)
 
 
 async def _get_owned_project_by_graph_id(
     db: AsyncSession,
     graph_id: str,
-    user_id: str | None = None,
 ) -> Project:
-    project = await project_repo.get_project_by_graph_id(db, graph_id, user_id=user_id)
+    project = await project_repo.get_project_by_graph_id(db, graph_id)
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Graph not found")
     return project
@@ -809,7 +788,6 @@ def _generate_ontology_sync(
 
 def _build_graph_sync(
     task_id: str,
-    user_id: str | None,
     text: str,
     ontology: dict[str, Any],
     graph_name: str,
@@ -823,14 +801,12 @@ def _build_graph_sync(
         if detail is None:
             writer.set_processing(
                 task_id,
-                user_id=user_id,
                 progress=progress,
                 message=message,
             )
         else:
             writer.set_processing(
                 task_id,
-                user_id=user_id,
                 progress=progress,
                 message=message,
                 progress_detail_json=detail,

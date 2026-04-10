@@ -19,7 +19,6 @@ _UNSET = object()
 @dataclass(frozen=True, slots=True)
 class TaskState:
     id: str
-    user_id: str
     task_type: str
     status: str
     progress: int
@@ -36,7 +35,6 @@ class TaskState:
     def from_model(cls, task: Task) -> "TaskState":
         return cls(
             id=task.id,
-            user_id=task.user_id,
             task_type=task.task_type,
             status=task.status,
             progress=task.progress,
@@ -65,7 +63,6 @@ class TaskStateWriter:
         self,
         *,
         id: str,
-        user_id: str,
         task_type: str,
         project_id: str | None = None,
         simulation_id: str | None = None,
@@ -79,7 +76,6 @@ class TaskStateWriter:
         task = self._run(
             self._create_task(
                 id=id,
-                user_id=user_id,
                 task_type=task_type,
                 project_id=project_id,
                 simulation_id=simulation_id,
@@ -93,8 +89,8 @@ class TaskStateWriter:
         )
         return TaskState.from_model(task)
 
-    def get_task(self, task_id: str, *, user_id: str | None = None) -> TaskState | None:
-        task = self._run(self._get_task(task_id, user_id=user_id))
+    def get_task(self, task_id: str) -> TaskState | None:
+        task = self._run(self._get_task(task_id))
         if task is None:
             return None
         return TaskState.from_model(task)
@@ -103,7 +99,6 @@ class TaskStateWriter:
         self,
         task_id: str,
         *,
-        user_id: str | None = None,
         project_id: str | None | object = _UNSET,
         simulation_id: str | None | object = _UNSET,
         task_type: str | object = _UNSET,
@@ -128,7 +123,6 @@ class TaskStateWriter:
         task = self._run(
             self._update_task(
                 task_id,
-                user_id=user_id,
                 **{key: value for key, value in update_fields.items() if value is not _UNSET},
             )
         )
@@ -140,7 +134,6 @@ class TaskStateWriter:
         self,
         task_id: str,
         *,
-        user_id: str | None = None,
         progress: int | None = None,
         message: str | None = None,
         progress_detail_json: dict | list | None | object = _UNSET,
@@ -152,13 +145,12 @@ class TaskStateWriter:
             kwargs["message"] = message
         if progress_detail_json is not _UNSET:
             kwargs["progress_detail_json"] = progress_detail_json
-        return self.update_task(task_id, user_id=user_id, **kwargs)
+        return self.update_task(task_id, **kwargs)
 
     def set_completed(
         self,
         task_id: str,
         *,
-        user_id: str | None = None,
         message: str | None = None,
         result_json: dict | list | None | object = _UNSET,
         progress_detail_json: dict | list | None | object = _UNSET,
@@ -174,14 +166,13 @@ class TaskStateWriter:
             kwargs["result_json"] = result_json
         if progress_detail_json is not _UNSET:
             kwargs["progress_detail_json"] = progress_detail_json
-        return self.update_task(task_id, user_id=user_id, **kwargs)
+        return self.update_task(task_id, **kwargs)
 
     def set_failed(
         self,
         task_id: str,
         *,
         error: str,
-        user_id: str | None = None,
         message: str | None = None,
         progress: int | None = None,
         result_json: dict | list | None | object = _UNSET,
@@ -199,15 +190,15 @@ class TaskStateWriter:
             kwargs["result_json"] = result_json
         if progress_detail_json is not _UNSET:
             kwargs["progress_detail_json"] = progress_detail_json
-        return self.update_task(task_id, user_id=user_id, **kwargs)
+        return self.update_task(task_id, **kwargs)
 
     async def _create_task(self, **kwargs) -> Task:
         async with self._session_scope() as session:
             return await task_repo.create_task(session, **kwargs)
 
-    async def _get_task(self, task_id: str, *, user_id: str | None = None) -> Task | None:
+    async def _get_task(self, task_id: str) -> Task | None:
         async with self._session_scope() as session:
-            return await task_repo.get_task_by_id(session, task_id, user_id=user_id)
+            return await task_repo.get_task_by_id(session, task_id)
 
     async def _update_task(self, task_id: str, **kwargs) -> Task | None:
         async with self._session_scope() as session:

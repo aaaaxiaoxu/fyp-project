@@ -5,7 +5,6 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db import SYSTEM_OWNER_ID
 from ..models import Simulation, SimulationStatus
 from ..utils.path_resolver import as_upload_relative_path
 
@@ -17,7 +16,6 @@ async def create_simulation(
     *,
     id: str,
     project_id: str,
-    user_id: str = SYSTEM_OWNER_ID,
     twitter_enabled: bool,
     reddit_enabled: bool,
     status: str = SimulationStatus.CREATED.value,
@@ -35,7 +33,6 @@ async def create_simulation(
     simulation = Simulation(
         id=id,
         project_id=project_id,
-        user_id=user_id,
         status=status,
         twitter_enabled=twitter_enabled,
         reddit_enabled=reddit_enabled,
@@ -59,25 +56,18 @@ async def create_simulation(
 async def get_simulation_by_id(
     session: AsyncSession,
     simulation_id: str,
-    *,
-    user_id: str | None = None,
 ) -> Simulation | None:
     stmt = select(Simulation).where(Simulation.id == simulation_id)
-    if user_id is not None:
-        stmt = stmt.where(Simulation.user_id == user_id)
     return await session.scalar(stmt)
 
 
-async def list_simulations_by_user(
+async def list_simulations(
     session: AsyncSession,
-    user_id: str | None = None,
     *,
     project_id: str | None = None,
     status: str | None = None,
 ) -> list[Simulation]:
     stmt = select(Simulation)
-    if user_id is not None:
-        stmt = stmt.where(Simulation.user_id == user_id)
     if project_id is not None:
         stmt = stmt.where(Simulation.project_id == project_id)
     if status is not None:
@@ -90,7 +80,6 @@ async def update_simulation(
     session: AsyncSession,
     simulation_id: str,
     *,
-    user_id: str | None = None,
     status: str | object = _UNSET,
     twitter_enabled: bool | object = _UNSET,
     reddit_enabled: bool | object = _UNSET,
@@ -105,7 +94,7 @@ async def update_simulation(
     started_at: datetime | None | object = _UNSET,
     completed_at: datetime | None | object = _UNSET,
 ) -> Simulation | None:
-    simulation = await get_simulation_by_id(session, simulation_id, user_id=user_id)
+    simulation = await get_simulation_by_id(session, simulation_id)
     if simulation is None:
         return None
 
@@ -144,10 +133,8 @@ async def update_simulation(
 async def delete_simulation(
     session: AsyncSession,
     simulation_id: str,
-    *,
-    user_id: str | None = None,
 ) -> bool:
-    simulation = await get_simulation_by_id(session, simulation_id, user_id=user_id)
+    simulation = await get_simulation_by_id(session, simulation_id)
     if simulation is None:
         return False
 

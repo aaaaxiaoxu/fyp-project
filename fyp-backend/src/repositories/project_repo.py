@@ -3,7 +3,6 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db import SYSTEM_OWNER_ID
 from ..models import Project, ProjectStatus
 from ..utils.path_resolver import as_upload_relative_path
 
@@ -14,7 +13,6 @@ async def create_project(
     session: AsyncSession,
     *,
     id: str,
-    user_id: str = SYSTEM_OWNER_ID,
     name: str,
     simulation_requirement: str,
     status: str = ProjectStatus.CREATED.value,
@@ -24,7 +22,6 @@ async def create_project(
 ) -> Project:
     project = Project(
         id=id,
-        user_id=user_id,
         name=name,
         status=status,
         zep_graph_id=zep_graph_id,
@@ -41,24 +38,17 @@ async def create_project(
 async def get_project_by_id(
     session: AsyncSession,
     project_id: str,
-    *,
-    user_id: str | None = None,
 ) -> Project | None:
     stmt = select(Project).where(Project.id == project_id)
-    if user_id is not None:
-        stmt = stmt.where(Project.user_id == user_id)
     return await session.scalar(stmt)
 
 
-async def list_projects_by_user(
+async def list_projects(
     session: AsyncSession,
-    user_id: str | None = None,
     *,
     status: str | None = None,
 ) -> list[Project]:
     stmt = select(Project)
-    if user_id is not None:
-        stmt = stmt.where(Project.user_id == user_id)
     if status is not None:
         stmt = stmt.where(Project.status == status)
     stmt = stmt.order_by(Project.created_at.desc())
@@ -68,12 +58,8 @@ async def list_projects_by_user(
 async def get_project_by_graph_id(
     session: AsyncSession,
     graph_id: str,
-    *,
-    user_id: str | None = None,
 ) -> Project | None:
     stmt = select(Project).where(Project.zep_graph_id == graph_id)
-    if user_id is not None:
-        stmt = stmt.where(Project.user_id == user_id)
     return await session.scalar(stmt)
 
 
@@ -81,7 +67,6 @@ async def update_project(
     session: AsyncSession,
     project_id: str,
     *,
-    user_id: str | None = None,
     name: str | object = _UNSET,
     status: str | object = _UNSET,
     zep_graph_id: str | None | object = _UNSET,
@@ -89,7 +74,7 @@ async def update_project(
     ontology_path: str | None | object = _UNSET,
     extracted_text_path: str | None | object = _UNSET,
 ) -> Project | None:
-    project = await get_project_by_id(session, project_id, user_id=user_id)
+    project = await get_project_by_id(session, project_id)
     if project is None:
         return None
 
@@ -114,10 +99,8 @@ async def update_project(
 async def delete_project(
     session: AsyncSession,
     project_id: str,
-    *,
-    user_id: str | None = None,
 ) -> bool:
-    project = await get_project_by_id(session, project_id, user_id=user_id)
+    project = await get_project_by_id(session, project_id)
     if project is None:
         return False
 
