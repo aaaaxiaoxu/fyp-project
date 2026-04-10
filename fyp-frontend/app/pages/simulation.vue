@@ -629,7 +629,18 @@
               </div>
             </div>
 
-            <div class="system-logs">
+            <div class="log-toggle-row">
+              <button
+                class="log-toggle-btn"
+                :class="{ active: showSystemDashboard }"
+                :aria-expanded="showSystemDashboard"
+                @click="showSystemDashboard = !showSystemDashboard"
+              >
+                {{ showSystemDashboard ? 'Hide System Dashboard' : `Show System Dashboard (${systemLogs.length})` }}
+              </button>
+            </div>
+
+            <div v-if="showSystemDashboard" class="system-logs">
               <div class="log-header">
                 <span class="log-title">SYSTEM DASHBOARD</span>
                 <span class="log-id">{{ selectedProject?.id || 'NO_PROJECT' }}</span>
@@ -876,6 +887,7 @@ const runtimeActions = ref<SimulationAction[]>([])
 const selectedEntityTypes = ref<string[]>([])
 const profileSearch = ref('')
 const runtimeActionPlatform = ref<RuntimeActionPlatform>('all')
+const showSystemDashboard = ref(false)
 
 const projectsLoading = ref(false)
 const graphLoading = ref(false)
@@ -2720,6 +2732,35 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+.log-toggle-row {
+  position: sticky;
+  bottom: 0;
+  z-index: 4;
+  display: flex;
+  justify-content: flex-end;
+  padding: 10px 0 0;
+  background: #fcfcfc;
+}
+
+.log-toggle-btn {
+  border: 1px solid #dedede;
+  background: #fff;
+  color: #111;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.log-toggle-btn.active {
+  background: #111;
+  border-color: #111;
+  color: #fff;
 }
 
 .log-title {

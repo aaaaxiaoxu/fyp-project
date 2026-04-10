@@ -264,33 +264,16 @@ class ZepToolsService:
             raise ValueError(f"Agent {agent_id} profile not found")
 
         name = str(profile.get("name") or profile.get("username") or f"Agent {agent_id}")
-        persona = str(profile.get("persona") or profile.get("bio") or "No persona text is available.")
         topics = ", ".join(str(topic) for topic in profile.get("interested_topics", [])[:4])
         query = " ".join(part for part in [name, topics, question] if part).strip()
         facts = self.quick_search(query, limit=fact_limit).facts
         recent_actions = self._recent_actions_for_agent(agent_id, limit=5)
 
-        action_summary = ""
-        if recent_actions:
-            action_bits = [
-                f"round {action.get('round_number', 'N/A')} {action.get('platform', 'unknown')} "
-                f"{action.get('action_type', 'ACTION')}: {action.get('content') or action.get('topic') or ''}".strip()
-                for action in recent_actions
-            ]
-            action_summary = " Recent observed actions: " + " | ".join(action_bits)
-
-        fact_summary = " ".join(f'"{fact}"' for fact in facts[:2])
-        answer = (
-            f"I am {name}. From my persona: {persona} "
-            f"My response to '{question}' is grounded in the simulation facts: {fact_summary or 'no direct fact matched.'}"
-            f"{action_summary}"
-        ).strip()
-
         return AgentInterviewResult(
             agent_id=agent_id,
             agent_name=name,
             question=question,
-            answer=answer,
+            answer="",
             profile=profile,
             facts=facts,
             recent_actions=recent_actions,
