@@ -9,8 +9,8 @@
 
         <div class="header-center">
           <div class="workflow-step">
-            <span class="step-num">Step 2/5</span>
-            <span class="step-name">Simulation Prepare</span>
+            <span class="step-num">Step 2-3/5</span>
+            <span class="step-name">Simulation Control</span>
           </div>
         </div>
 
@@ -65,8 +65,8 @@
                 <span class="summary-label">TOTAL ROUNDS</span>
               </div>
               <div class="summary-card">
-                <span class="summary-value">{{ activePlatforms.length }}</span>
-                <span class="summary-label">PLATFORMS</span>
+                <span class="summary-value">{{ totalRuntimeActions }}</span>
+                <span class="summary-label">ACTIONS</span>
               </div>
             </div>
 
@@ -148,11 +148,88 @@
                   </div>
                 </article>
               </div>
+
             </template>
 
-            <div v-else class="empty-state">
+            <div v-if="!simulationProfiles.length" class="empty-state">
               <div class="empty-mark">02</div>
-              <p>Run Simulation Prepare to generate personas and reviewable config for this project.</p>
+              <p>
+                {{ simulationConfig ? 'No profiles were returned for this simulation, but runtime actions can still be reviewed below.' : 'Run Simulation Prepare to generate personas and reviewable config for this project.' }}
+              </p>
+            </div>
+
+            <div v-if="simulationConfig" class="runtime-feed-panel">
+              <div class="runtime-feed-head">
+                <div>
+                  <span class="panel-title">ACTION STREAM</span>
+                  <p class="description">
+                    Recent Twitter / Reddit actions from the Step 3 runtime. Latest items appear first.
+                  </p>
+                </div>
+                <div class="feed-tabs">
+                  <button
+                    v-for="platform in actionPlatformTabs"
+                    :key="platform.value"
+                    class="filter-chip"
+                    :class="{ active: runtimeActionPlatform === platform.value }"
+                    :disabled="actionsLoading"
+                    @click="setRuntimeActionPlatform(platform.value)"
+                  >
+                    {{ platform.label }}
+                  </button>
+                </div>
+              </div>
+
+              <div class="runtime-feed-stats">
+                <div class="mini-stat">
+                  <span class="mini-label">Runtime</span>
+                  <span class="mini-value">{{ runtimeStatusMeta.label }}</span>
+                </div>
+                <div class="mini-stat">
+                  <span class="mini-label">Round</span>
+                  <span class="mini-value">{{ runtimeRoundText }}</span>
+                </div>
+                <div class="mini-stat">
+                  <span class="mini-label">Twitter</span>
+                  <span class="mini-value">{{ runtimeStatus?.twitter_actions_count ?? 0 }}</span>
+                </div>
+                <div class="mini-stat">
+                  <span class="mini-label">Reddit</span>
+                  <span class="mini-value">{{ runtimeStatus?.reddit_actions_count ?? 0 }}</span>
+                </div>
+              </div>
+
+              <div v-if="runtimeError" class="inline-error">
+                {{ summarizeError(runtimeError) }}
+              </div>
+
+              <div v-if="displayedRuntimeActions.length" class="action-feed">
+                <article
+                  v-for="(action, index) in displayedRuntimeActions"
+                  :key="actionKey(action, index)"
+                  class="action-item"
+                  :class="action.platform"
+                >
+                  <div class="action-meta">
+                    <span class="badge soft">{{ action.platform || 'unknown' }}</span>
+                    <span class="mono">round {{ action.round_number ?? 'N/A' }}</span>
+                    <span class="mono">agent {{ action.agent_id ?? 'N/A' }}</span>
+                    <span>{{ formatActionTime(action.created_at) }}</span>
+                  </div>
+                  <div class="action-title">
+                    <span>{{ action.agent_name || `Agent ${action.agent_id ?? '?'}` }}</span>
+                    <span class="action-type">{{ normalizeActionType(action.action_type) }}</span>
+                  </div>
+                  <p class="action-content">{{ action.content || action.topic || 'No action content.' }}</p>
+                  <div v-if="action.topic" class="tag-row compact">
+                    <span class="entity-tag soft-tag">{{ action.topic }}</span>
+                  </div>
+                </article>
+              </div>
+
+              <div v-else class="empty-module-state">
+                {{ actionsLoading ? 'Loading action log...' : 'No runtime actions yet. Start the simulation to stream activity.' }}
+              </div>
             </div>
           </div>
         </section>
@@ -453,6 +530,105 @@
               </div>
             </div>
 
+            <div
+              class="step-card runtime-card"
+              :class="{ active: !!simulationConfig, completed: runtimeStatus?.interactive_ready }"
+            >
+              <div class="card-header">
+                <div class="step-info">
+                  <span class="step-num">06</span>
+                  <span class="step-title">Runtime Console</span>
+                </div>
+                <div class="step-status">
+                  <span :class="runtimeStatusMeta.class">{{ runtimeStatusMeta.label }}</span>
+                </div>
+              </div>
+
+              <div class="card-content">
+                <p class="api-note">
+                  POST /api/simulation/start/{simulation_id} · GET /api/simulation/status/{simulation_id} · POST /api/simulation/stop/{simulation_id}
+                </p>
+                <p class="description">
+                  Start the Step 3 runtime, poll DB-backed progress, and stop via IPC without making the browser a state writer.
+                </p>
+
+                <template v-if="simulationConfig">
+                  <div class="runtime-meter">
+                    <div>
+                      <span class="tag-label">ROUND PROGRESS</span>
+                      <div class="runtime-round-text">{{ runtimeRoundText }}</div>
+                    </div>
+                    <div class="runtime-bar" aria-label="Simulation progress">
+                      <span :style="{ width: `${runtimeProgress}%` }"></span>
+                    </div>
+                  </div>
+
+                  <div class="info-grid">
+                    <div class="info-item">
+                      <span class="info-label">Simulation</span>
+                      <span class="info-value mono">{{ activeSimulationId }}</span>
+                    </div>
+                    <div class="info-item">
+                      <span class="info-label">Interactive</span>
+                      <span class="info-value">{{ runtimeStatus?.interactive_ready ? 'Ready for Explorer' : 'Not ready' }}</span>
+                    </div>
+                    <div class="info-item">
+                      <span class="info-label">Twitter Actions</span>
+                      <span class="info-value">{{ runtimeStatus?.twitter_actions_count ?? 0 }}</span>
+                    </div>
+                    <div class="info-item">
+                      <span class="info-label">Reddit Actions</span>
+                      <span class="info-value">{{ runtimeStatus?.reddit_actions_count ?? 0 }}</span>
+                    </div>
+                  </div>
+
+                  <div v-if="runtimeStatus?.error || runtimeError" class="inline-error">
+                    {{ summarizeError(runtimeStatus?.error || runtimeError) }}
+                  </div>
+
+                  <div v-if="runtimeStatus?.interactive_ready" class="explorer-ready">
+                    <div>
+                      <span class="event-title">Explorer handoff is ready</span>
+                      <p>Simulation artifacts are ready for Step 4 Explorer ask and interview workflows.</p>
+                    </div>
+                    <button class="action-btn secondary" @click="goToExplorer">
+                      Open Explorer
+                    </button>
+                  </div>
+
+                  <div class="action-row">
+                    <button
+                      class="action-btn secondary"
+                      :disabled="runtimeLoading || !activeSimulationId"
+                      @click="refreshSimulationRuntime"
+                    >
+                      {{ runtimeLoading ? 'Refreshing...' : 'Refresh Runtime' }}
+                    </button>
+                    <button
+                      class="action-btn"
+                      :disabled="runtimeStarting || !canStartRuntime"
+                      @click="startSimulationRuntime"
+                    >
+                      <span v-if="runtimeStarting" class="spinner-sm"></span>
+                      {{ startRuntimeLabel }}
+                    </button>
+                    <button
+                      class="action-btn danger-action"
+                      :disabled="runtimeStopping || runtimeStatus?.status !== 'running'"
+                      @click="stopSimulationRuntime"
+                    >
+                      <span v-if="runtimeStopping" class="spinner-sm"></span>
+                      {{ runtimeStopping ? 'Stopping...' : 'Stop Simulation' }}
+                    </button>
+                  </div>
+                </template>
+
+                <div v-else class="empty-module-state">
+                  Generate or restore a simulation config before starting runtime.
+                </div>
+              </div>
+            </div>
+
             <div class="system-logs">
               <div class="log-header">
                 <span class="log-title">SYSTEM DASHBOARD</span>
@@ -480,6 +656,8 @@ import { getApiErrorMessage, useApiFetch } from '~/composables/useApiFetch'
 
 type ProjectStatus = 'created' | 'ontology_generated' | 'graph_building' | 'graph_completed' | 'failed'
 type TaskStatus = 'pending' | 'processing' | 'completed' | 'failed'
+type RuntimeStatus = 'created' | 'preparing' | 'ready' | 'running' | 'completed' | 'stopped' | 'failed'
+type RuntimeActionPlatform = 'all' | 'twitter' | 'reddit'
 
 type ProjectRecord = {
   id: string
@@ -616,6 +794,56 @@ type SimulationConfig = {
   generation_reasoning: string
 }
 
+type SimulationAction = {
+  simulation_id?: string
+  platform?: string
+  round_number?: number
+  agent_id?: number
+  agent_name?: string
+  action_type?: string
+  topic?: string
+  content?: string
+  created_at?: string
+  metadata?: Record<string, any>
+}
+
+type SimulationStatusResponse = {
+  simulation_id: string
+  project_id: string
+  status: RuntimeStatus
+  total_rounds: number | null
+  current_round: number
+  twitter_enabled: boolean
+  reddit_enabled: boolean
+  twitter_actions_count: number
+  reddit_actions_count: number
+  recent_actions: SimulationAction[]
+  interactive_ready: boolean
+  error: string | null
+  started_at: string | null
+  completed_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+type SimulationActionsResponse = {
+  simulation_id: string
+  count: number
+  actions: SimulationAction[]
+}
+
+type StartSimulationResponse = {
+  simulation_id: string
+  status: RuntimeStatus
+  pid: number
+}
+
+type StopSimulationResponse = {
+  simulation_id: string
+  status: string
+  command_id: string
+}
+
 type PersistedWorkspaceState = {
   selectedProjectId: string | null
   prepareTaskIds: Record<string, string>
@@ -643,17 +871,25 @@ const graphData = ref<GraphDataResponse | null>(null)
 const prepareTask = ref<TaskRecord | null>(null)
 const simulationConfig = ref<SimulationConfig | null>(null)
 const simulationProfiles = ref<SimulationProfile[]>([])
+const runtimeStatus = ref<SimulationStatusResponse | null>(null)
+const runtimeActions = ref<SimulationAction[]>([])
 const selectedEntityTypes = ref<string[]>([])
 const profileSearch = ref('')
+const runtimeActionPlatform = ref<RuntimeActionPlatform>('all')
 
 const projectsLoading = ref(false)
 const graphLoading = ref(false)
 const prepareSubmitting = ref(false)
 const resultsLoading = ref(false)
+const runtimeLoading = ref(false)
+const runtimeStarting = ref(false)
+const runtimeStopping = ref(false)
+const actionsLoading = ref(false)
 
 const pageError = ref('')
 const prepareError = ref('')
 const resultsError = ref('')
+const runtimeError = ref('')
 
 const systemLogs = ref<SystemLog[]>([])
 const logContentRef = ref<HTMLDivElement | null>(null)
@@ -673,6 +909,7 @@ const persistedState = reactive<PersistedWorkspaceState>({
 })
 
 let preparePollTimer: ReturnType<typeof window.setInterval> | null = null
+let runtimePollTimer: ReturnType<typeof window.setInterval> | null = null
 
 const selectedProject = computed(() => {
   return projects.value.find((project) => project.id === selectedProjectId.value) || null
@@ -730,17 +967,6 @@ const filteredProfiles = computed(() => {
   })
 })
 
-const activePlatforms = computed(() => {
-  const platforms: string[] = []
-  if (simulationConfig.value?.twitter_config) {
-    platforms.push('twitter')
-  }
-  if (simulationConfig.value?.reddit_config) {
-    platforms.push('reddit')
-  }
-  return platforms
-})
-
 const platformCards = computed(() => {
   return [simulationConfig.value?.twitter_config, simulationConfig.value?.reddit_config].filter(
     (platform): platform is PlatformConfig => platform !== null && platform !== undefined,
@@ -757,13 +983,69 @@ const totalRounds = computed(() => {
   return Math.max(1, Math.ceil((timeConfig.total_simulation_hours * 60) / Math.max(timeConfig.minutes_per_round, 1)))
 })
 
+const totalRuntimeActions = computed(() => {
+  return (runtimeStatus.value?.twitter_actions_count || 0) + (runtimeStatus.value?.reddit_actions_count || 0)
+})
+
+const runtimeStatusMeta = computed(() => runtimeMeta(runtimeStatus.value?.status || (simulationConfig.value ? 'ready' : 'created')))
+
+const runtimeRoundText = computed(() => {
+  const currentRound = runtimeStatus.value?.current_round ?? 0
+  const total = runtimeStatus.value?.total_rounds || totalRounds.value || 0
+  return total ? `${currentRound} / ${total}` : `${currentRound}`
+})
+
+const runtimeProgress = computed(() => {
+  const currentRound = runtimeStatus.value?.current_round ?? 0
+  const total = runtimeStatus.value?.total_rounds || totalRounds.value || 0
+  if (total <= 0) {
+    return 0
+  }
+  return Math.min(100, Math.max(0, Math.round((currentRound / total) * 100)))
+})
+
+const displayedRuntimeActions = computed(() => {
+  const source = runtimeActions.value.length ? runtimeActions.value : runtimeStatus.value?.recent_actions || []
+  return [...source].reverse()
+})
+
+const canStartRuntime = computed(() => {
+  if (!activeSimulationId.value || !simulationConfig.value) {
+    return false
+  }
+  const status = runtimeStatus.value?.status || 'ready'
+  return ['ready', 'completed', 'stopped', 'failed'].includes(status)
+})
+
+const startRuntimeLabel = computed(() => {
+  if (runtimeStarting.value) {
+    return 'Starting...'
+  }
+  if (runtimeStatus.value?.status === 'completed' || runtimeStatus.value?.status === 'stopped') {
+    return 'Restart Simulation'
+  }
+  return 'Start Simulation'
+})
+
+const actionPlatformTabs: Array<{ label: string; value: RuntimeActionPlatform }> = [
+  { label: 'All', value: 'all' },
+  { label: 'Twitter', value: 'twitter' },
+  { label: 'Reddit', value: 'reddit' },
+]
+
 const latestError = computed(() => {
-  return pageError.value || prepareError.value || resultsError.value || prepareTask.value?.error || ''
+  return pageError.value || prepareError.value || resultsError.value || runtimeError.value || prepareTask.value?.error || ''
 })
 
 const statusClass = computed(() => {
   if (latestError.value) {
     return 'error'
+  }
+  if (runtimeStatus.value?.status === 'running') {
+    return 'processing'
+  }
+  if (runtimeStatus.value?.interactive_ready) {
+    return 'completed'
   }
   if (simulationConfig.value) {
     return 'completed'
@@ -780,6 +1062,12 @@ const statusClass = computed(() => {
 const statusText = computed(() => {
   if (latestError.value) {
     return 'Error'
+  }
+  if (runtimeStatus.value?.status === 'running') {
+    return 'Simulation Running'
+  }
+  if (runtimeStatus.value?.interactive_ready) {
+    return 'Explorer Ready'
   }
   if (simulationConfig.value) {
     return 'Review Ready'
@@ -859,6 +1147,49 @@ function statusMeta(status: ProjectStatus) {
   return meta[status] ?? { label: status, class: 'badge pending' }
 }
 
+function runtimeMeta(status: RuntimeStatus | string) {
+  const meta: Record<string, { label: string; class: string }> = {
+    created: { label: 'Not Prepared', class: 'badge pending' },
+    preparing: { label: 'Preparing', class: 'badge processing' },
+    ready: { label: 'Ready', class: 'badge accent' },
+    running: { label: 'Running', class: 'badge processing' },
+    completed: { label: 'Completed', class: 'badge success' },
+    stopped: { label: 'Stopped', class: 'badge success' },
+    failed: { label: 'Failed', class: 'badge danger' },
+  }
+  return meta[status] ?? { label: status, class: 'badge pending' }
+}
+
+function normalizeActionType(value: string | undefined) {
+  return value ? value.replaceAll('_', ' ') : 'ACTION'
+}
+
+function formatActionTime(value: string | undefined) {
+  if (!value) {
+    return 'pending'
+  }
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return value
+  }
+  return date.toLocaleTimeString('en-US', {
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  })
+}
+
+function actionKey(action: SimulationAction, index: number) {
+  return [
+    action.platform || 'platform',
+    action.round_number ?? 'round',
+    action.agent_id ?? 'agent',
+    action.action_type || 'action',
+    action.created_at || index,
+  ].join(':')
+}
+
 function persistWorkspaceState() {
   if (!import.meta.client) {
     return
@@ -933,12 +1264,32 @@ function stopPreparePolling() {
   }
 }
 
+function stopRuntimePolling() {
+  if (runtimePollTimer) {
+    clearInterval(runtimePollTimer)
+    runtimePollTimer = null
+  }
+}
+
+function clearRuntimeState() {
+  stopRuntimePolling()
+  runtimeStatus.value = null
+  runtimeActions.value = []
+  runtimeError.value = ''
+  runtimeLoading.value = false
+  runtimeStarting.value = false
+  runtimeStopping.value = false
+  actionsLoading.value = false
+  runtimeActionPlatform.value = 'all'
+}
+
 function clearSimulationResults() {
   simulationConfig.value = null
   simulationProfiles.value = []
   resultsError.value = ''
   resultsLoading.value = false
   profileSearch.value = ''
+  clearRuntimeState()
 }
 
 async function fetchProjects() {
@@ -974,6 +1325,25 @@ async function fetchSimulationConfigById(simulationId: string) {
 
 async function fetchSimulationProfilesById(simulationId: string) {
   return await apiFetch<SimulationProfilesResponse>(`/api/simulation/${simulationId}/profiles`, { method: 'GET' })
+}
+
+async function fetchSimulationStatusById(simulationId: string, recentLimit = 30) {
+  return await apiFetch<SimulationStatusResponse>(`/api/simulation/status/${simulationId}?recent_limit=${recentLimit}`, {
+    method: 'GET',
+  })
+}
+
+async function fetchSimulationActionsById(simulationId: string, platform: RuntimeActionPlatform) {
+  const query = platform === 'all' ? '' : `?platform=${platform}`
+  return await apiFetch<SimulationActionsResponse>(`/api/simulation/actions/${simulationId}${query}`, { method: 'GET' })
+}
+
+async function postSimulationStart(simulationId: string) {
+  return await apiFetch<StartSimulationResponse>(`/api/simulation/start/${simulationId}`, { method: 'POST' })
+}
+
+async function postSimulationStop(simulationId: string) {
+  return await apiFetch<StopSimulationResponse>(`/api/simulation/stop/${simulationId}`, { method: 'POST' })
 }
 
 async function resolveProjectIdFromSimulationQuery() {
@@ -1062,6 +1432,7 @@ async function loadSimulationArtifacts(simulationId: string, projectId: string) 
     persistWorkspaceState()
     syncSimulationQuery(simulationId)
     addLog(`Simulation results restored: ${simulationId}`)
+    await refreshSimulationRuntimeFor(simulationId, projectId, { loadActions: true })
   } catch (error) {
     if (selectedProjectId.value === projectId) {
       resultsError.value = normalizeApiError(error)
@@ -1073,6 +1444,191 @@ async function loadSimulationArtifacts(simulationId: string, projectId: string) 
     if (selectedProjectId.value === projectId) {
       resultsLoading.value = false
     }
+  }
+}
+
+async function loadRuntimeActionsFor(simulationId: string, projectId: string) {
+  actionsLoading.value = true
+  try {
+    const response = await fetchSimulationActionsById(simulationId, runtimeActionPlatform.value)
+    if (selectedProjectId.value !== projectId || activeSimulationId.value !== simulationId) {
+      return
+    }
+    runtimeActions.value = response.actions
+  } catch (error) {
+    if (selectedProjectId.value === projectId && activeSimulationId.value === simulationId) {
+      runtimeError.value = normalizeApiError(error)
+    }
+    addLog(`Action log refresh failed: ${normalizeApiError(error)}`)
+  } finally {
+    if (selectedProjectId.value === projectId && activeSimulationId.value === simulationId) {
+      actionsLoading.value = false
+    }
+  }
+}
+
+async function refreshSimulationRuntimeFor(
+  simulationId: string,
+  projectId: string,
+  options: { loadActions?: boolean; silent?: boolean } = {},
+) {
+  runtimeLoading.value = !options.silent
+  runtimeError.value = ''
+
+  try {
+    const response = await fetchSimulationStatusById(simulationId)
+    if (selectedProjectId.value !== projectId || activeSimulationId.value !== simulationId) {
+      return
+    }
+
+    runtimeStatus.value = response
+    if (!options.silent) {
+      addLog(`Runtime status: ${response.status}, round ${response.current_round}`)
+    }
+
+    if (response.status === 'running') {
+      startRuntimePolling(simulationId, projectId)
+    } else {
+      stopRuntimePolling()
+    }
+
+    if (options.loadActions || response.status !== 'running') {
+      await loadRuntimeActionsFor(simulationId, projectId)
+    } else if (!runtimeActions.value.length && response.recent_actions.length) {
+      runtimeActions.value = response.recent_actions
+    }
+  } catch (error) {
+    if (selectedProjectId.value === projectId && activeSimulationId.value === simulationId) {
+      runtimeError.value = normalizeApiError(error)
+    }
+    addLog(`Runtime status refresh failed: ${normalizeApiError(error)}`)
+  } finally {
+    if (selectedProjectId.value === projectId && activeSimulationId.value === simulationId) {
+      runtimeLoading.value = false
+    }
+  }
+}
+
+async function pollRuntimeStatus(simulationId: string, projectId: string) {
+  try {
+    const response = await fetchSimulationStatusById(simulationId)
+    if (selectedProjectId.value !== projectId || activeSimulationId.value !== simulationId) {
+      return
+    }
+
+    const previousStatus = runtimeStatus.value?.status
+    runtimeStatus.value = response
+    if (response.recent_actions.length && runtimeActionPlatform.value === 'all') {
+      runtimeActions.value = response.recent_actions
+    }
+
+    if (previousStatus !== response.status) {
+      addLog(`Runtime state changed: ${response.status}`)
+    }
+
+    if (response.status !== 'running') {
+      stopRuntimePolling()
+      await loadRuntimeActionsFor(simulationId, projectId)
+    }
+  } catch (error) {
+    stopRuntimePolling()
+    if (selectedProjectId.value === projectId && activeSimulationId.value === simulationId) {
+      runtimeError.value = normalizeApiError(error)
+    }
+    addLog(`Runtime polling failed: ${normalizeApiError(error)}`)
+  }
+}
+
+function startRuntimePolling(simulationId: string, projectId: string) {
+  if (!import.meta.client) {
+    return
+  }
+
+  if (runtimePollTimer) {
+    return
+  }
+  runtimePollTimer = window.setInterval(() => {
+    void pollRuntimeStatus(simulationId, projectId)
+  }, 2000)
+}
+
+async function refreshSimulationRuntime() {
+  const projectId = selectedProjectId.value
+  const simulationId = activeSimulationId.value
+
+  if (!projectId || !simulationId) {
+    runtimeError.value = 'No simulation runtime available yet.'
+    return
+  }
+  await refreshSimulationRuntimeFor(simulationId, projectId, { loadActions: true })
+}
+
+async function startSimulationRuntime() {
+  runtimeError.value = ''
+  const projectId = selectedProjectId.value
+  const simulationId = activeSimulationId.value
+
+  if (!projectId || !simulationId) {
+    runtimeError.value = 'Prepare a simulation before starting runtime.'
+    return
+  }
+
+  runtimeStarting.value = true
+  addLog(`Starting simulation runtime: ${simulationId}`)
+
+  try {
+    const response = await postSimulationStart(simulationId)
+    addLog(`Runtime process accepted: pid ${response.pid}`)
+    await refreshSimulationRuntimeFor(response.simulation_id, projectId, { loadActions: true })
+    startRuntimePolling(response.simulation_id, projectId)
+  } catch (error) {
+    if (selectedProjectId.value === projectId && activeSimulationId.value === simulationId) {
+      runtimeError.value = normalizeApiError(error)
+      addLog(`Runtime start failed: ${runtimeError.value}`)
+    }
+  } finally {
+    if (selectedProjectId.value === projectId && activeSimulationId.value === simulationId) {
+      runtimeStarting.value = false
+    }
+  }
+}
+
+async function stopSimulationRuntime() {
+  runtimeError.value = ''
+  const projectId = selectedProjectId.value
+  const simulationId = activeSimulationId.value
+
+  if (!projectId || !simulationId) {
+    runtimeError.value = 'No simulation runtime is selected.'
+    return
+  }
+
+  runtimeStopping.value = true
+  addLog(`Requesting simulation stop: ${simulationId}`)
+
+  try {
+    const response = await postSimulationStop(simulationId)
+    addLog(`Stop command accepted: ${response.command_id}`)
+    startRuntimePolling(response.simulation_id, projectId)
+    await pollRuntimeStatus(response.simulation_id, projectId)
+  } catch (error) {
+    if (selectedProjectId.value === projectId && activeSimulationId.value === simulationId) {
+      runtimeError.value = normalizeApiError(error)
+      addLog(`Runtime stop failed: ${runtimeError.value}`)
+    }
+  } finally {
+    if (selectedProjectId.value === projectId && activeSimulationId.value === simulationId) {
+      runtimeStopping.value = false
+    }
+  }
+}
+
+function setRuntimeActionPlatform(platform: RuntimeActionPlatform) {
+  runtimeActionPlatform.value = platform
+  const projectId = selectedProjectId.value
+  const simulationId = activeSimulationId.value
+  if (projectId && simulationId) {
+    void loadRuntimeActionsFor(simulationId, projectId)
   }
 }
 
@@ -1276,6 +1832,17 @@ function goToGraph() {
   void router.push({ path: '/graph', query })
 }
 
+function goToExplorer() {
+  const query: Record<string, string> = {}
+  if (selectedProjectId.value) {
+    query.project = selectedProjectId.value
+  }
+  if (activeSimulationId.value) {
+    query.simulation = activeSimulationId.value
+  }
+  void router.push({ path: '/explorer', query })
+}
+
 watch(entityTypeOptions, (nextTypes) => {
   selectedEntityTypes.value = selectedEntityTypes.value.filter((item) => nextTypes.includes(item))
 })
@@ -1300,6 +1867,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   stopPreparePolling()
+  stopRuntimePolling()
 })
 </script>
 
@@ -1371,6 +1939,22 @@ onBeforeUnmount(() => {
   background: #fff;
   color: #111;
   border-color: #dedede;
+}
+
+.filter-chip.active {
+  background: #111;
+  color: #fff;
+  border-color: #111;
+}
+
+.action-btn.danger-action {
+  background: #c62828;
+  border-color: #c62828;
+}
+
+.action-btn.danger-action:disabled {
+  background: #111;
+  border-color: #111;
 }
 
 .header-btn:hover,
@@ -1570,6 +2154,96 @@ onBeforeUnmount(() => {
   gap: 14px;
 }
 
+.runtime-feed-panel {
+  margin-top: 18px;
+  border-top: 1px solid #e6e6e6;
+  padding-top: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.runtime-feed-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: flex-start;
+}
+
+.feed-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.runtime-feed-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.action-feed {
+  max-height: 540px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-right: 2px;
+}
+
+.action-item {
+  background: #fff;
+  border: 1px solid #e8e8e8;
+  border-left: 4px solid #111;
+  border-radius: 16px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.action-item.twitter {
+  border-left-color: #2f6fed;
+}
+
+.action-item.reddit {
+  border-left-color: #ef6c2f;
+}
+
+.action-meta,
+.action-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.action-meta {
+  color: #888;
+  font-size: 11px;
+}
+
+.action-title {
+  justify-content: space-between;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.action-type {
+  color: #666;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.action-content {
+  margin: 0;
+  color: #444;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 .profile-card {
   background: #fff;
   border: 1px solid #e8e8e8;
@@ -1747,6 +2421,12 @@ onBeforeUnmount(() => {
   padding: 18px;
 }
 
+.runtime-card {
+  background:
+    linear-gradient(135deg, rgba(17, 17, 17, 0.035), transparent 42%),
+    #fff;
+}
+
 .step-card.active,
 .project-card-button.active {
   border-color: #111;
@@ -1771,6 +2451,57 @@ onBeforeUnmount(() => {
   flex-direction: column;
   gap: 14px;
   margin-top: 14px;
+}
+
+.runtime-meter {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border-radius: 16px;
+  background: #fafafa;
+  border: 1px solid #e8e8e8;
+}
+
+.runtime-round-text {
+  font-size: 28px;
+  line-height: 1;
+  font-weight: 800;
+  letter-spacing: -0.04em;
+}
+
+.runtime-bar {
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e7e7e7;
+}
+
+.runtime-bar span {
+  display: block;
+  height: 100%;
+  min-width: 2px;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #111, #ff6f3d);
+  transition: width 0.35s ease;
+}
+
+.explorer-ready {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 16px;
+  background: #edf8ec;
+  border: 1px solid #cfe8cf;
+}
+
+.explorer-ready p {
+  margin: 4px 0 0;
+  color: #4d7d4d;
+  font-size: 12px;
+  line-height: 1.55;
 }
 
 .api-note {
@@ -2090,6 +2821,8 @@ onBeforeUnmount(() => {
   .header-left,
   .header-right,
   .roster-toolbar,
+  .runtime-feed-head,
+  .explorer-ready,
   .card-header,
   .log-header {
     flex-direction: column;
@@ -2097,6 +2830,7 @@ onBeforeUnmount(() => {
   }
 
   .summary-strip,
+  .runtime-feed-stats,
   .info-grid,
   .toggle-grid,
   .platform-grid,

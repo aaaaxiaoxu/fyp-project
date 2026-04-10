@@ -35,12 +35,13 @@ class SimulationIPC:
         self.run_state_path = simulation_run_state_path(simulation_id)
         self.env_status_path = simulation_env_status_path(simulation_id)
 
-    def initialize_runtime(self) -> None:
+    def initialize_runtime(self, *, purge_commands: bool = True) -> None:
         ensure_directory(self.commands_dir)
         ensure_directory(self.responses_dir)
-        # Purge any stale commands from a previous run so they don't affect restarts.
-        for stale in self.commands_dir.glob("*.json"):
-            stale.unlink(missing_ok=True)
+        if purge_commands:
+            # Purge any stale commands from a previous run so they don't affect restarts.
+            for stale in self.commands_dir.glob("*.json"):
+                stale.unlink(missing_ok=True)
         if not self.run_state_path.exists():
             self.write_run_state(
                 {
@@ -101,3 +102,15 @@ class SimulationIPC:
         target = self.responses_dir / filename
         target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return target
+
+    def write_command(self, *, command: str, payload: dict[str, Any] | None = None) -> IPCCommand:
+        command_name = command.strip()
+        if not command_name:
+            raise ValueError("command cannot be empty")
+
+        ensure_directory(self.commands_dir)
+        command_id = uuid4().hex
+        command_payload = {"command": command_name, **(payload or {})}
+        target = self.commands_dir / f"{command_id}.json"
+        target.write_text(json.dumps(command_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return IPCCommand(command_id=command_id, command=command_name, payload=payload or {})

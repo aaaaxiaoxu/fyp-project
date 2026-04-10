@@ -4,7 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import SYSTEM_OWNER_ID
-from ..models import ExplorerSession, ExplorerSessionStatus
+from ..models import ExplorerSession, ExplorerSessionStatus, utcnow
 from ..utils.path_resolver import as_upload_relative_path
 
 _UNSET = object()
@@ -72,6 +72,7 @@ async def update_explorer_session(
     title: str | object = _UNSET,
     status: str | object = _UNSET,
     log_path: str | None | object = _UNSET,
+    touch: bool = False,
 ) -> ExplorerSession | None:
     explorer_session = await get_explorer_session_by_id(session, session_id, user_id=user_id)
     if explorer_session is None:
@@ -83,6 +84,8 @@ async def update_explorer_session(
         explorer_session.status = str(status)
     if log_path is not _UNSET:
         explorer_session.log_path = _normalize_optional_upload_path(log_path)
+    if touch:
+        explorer_session.updated_at = utcnow()
 
     await session.commit()
     await session.refresh(explorer_session)

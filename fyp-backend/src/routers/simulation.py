@@ -6,16 +6,16 @@ import json
 import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..adapters import TaskStateWriter
 from ..db import SessionLocal, get_db
-from ..models import SimulationStatus, Task, TaskStatus
+from ..models import Simulation, SimulationStatus, Task, TaskStatus
 from ..repositories import project_repo, simulation_repo, task_repo
 from ..services import (
     OasisAgentProfile,
@@ -25,6 +25,8 @@ from ..services import (
     SimulationParameters,
     SimulationStartError,
     SimulationStartResult,
+    SimulationStopError,
+    SimulationStopResult,
     ZepEntityReader,
 )
 from ..utils import get_logger
@@ -38,7 +40,9 @@ from ..utils.path_resolver import (
     simulation_profiles_dir,
     simulation_profiles_path,
     simulation_reddit_profiles_path,
+    simulation_reddit_actions_path,
     simulation_twitter_profiles_path,
+    simulation_twitter_actions_path,
 )
 
 router = APIRouter(tags=["Simulation"])
@@ -102,6 +106,37 @@ class StartSimulationResponse(BaseModel):
     pid: int
 
 
+class StopSimulationResponse(BaseModel):
+    simulation_id: str
+    status: str
+    command_id: str
+
+
+class SimulationStatusResponse(BaseModel):
+    simulation_id: str
+    project_id: str
+    status: str
+    total_rounds: int | None
+    current_round: int
+    twitter_enabled: bool
+    reddit_enabled: bool
+    twitter_actions_count: int
+    reddit_actions_count: int
+    recent_actions: list[dict[str, Any]]
+    interactive_ready: bool
+    error: str | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class SimulationActionsResponse(BaseModel):
+    simulation_id: str
+    count: int
+    actions: list[dict[str, Any]]
+
+
 @router.post(
     "/prepare/{project_id}",
     response_model=CreatePrepareTaskResponse,
@@ -162,6 +197,57 @@ async def start_simulation(
     except SimulationStartError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     return _to_start_response(result)
+
+
+@router.get("/status/{simulation_id}", response_model=SimulationStatusResponse)
+async def get_simulation_status(
+    simulation_id: str,
+    recent_limit: int = Query(20, ge=0, le=200),
+    db: AsyncSession = Depends(get_db),
+) -> SimulationStatusResponse:
+    simulation = await simulation_repo.get_simulation_by_id(db, simulation_id)
+    if simulation is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Simulation not found")
+
+    recent_actions = await asyncio.to_thread(
+        _read_recent_actions,
+        simulation_id,
+        recent_limit,
+    )
+    return _to_status_response(simulation, recent_actions)
+
+
+@router.get("/actions/{simulation_id}", response_model=SimulationActionsResponse)
+async def get_simulation_actions(
+    simulation_id: str,
+    platform: Literal["twitter", "reddit"] | None = None,
+    db: AsyncSession = Depends(get_db),
+) -> SimulationActionsResponse:
+    simulation = await simulation_repo.get_simulation_by_id(db, simulation_id)
+    if simulation is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Simulation not found")
+
+    actions = await asyncio.to_thread(_read_actions, simulation_id, platform)
+    return SimulationActionsResponse(
+        simulation_id=simulation_id,
+        count=len(actions),
+        actions=actions,
+    )
+
+
+@router.post(
+    "/stop/{simulation_id}",
+    response_model=StopSimulationResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def stop_simulation(
+    simulation_id: str,
+) -> StopSimulationResponse:
+    try:
+        result = await simulation_manager.stop_simulation(simulation_id)
+    except SimulationStopError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    return _to_stop_response(result)
 
 
 @router.get("/prepare/status/{task_id}", response_model=SimulationTaskResponse)
@@ -586,6 +672,74 @@ def _read_text_file(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _read_recent_actions(simulation_id: str, limit: int) -> list[dict[str, Any]]:
+    if limit <= 0:
+        return []
+    return _read_actions(simulation_id, None)[-limit:]
+
+
+def _read_actions(
+    simulation_id: str,
+    platform: Literal["twitter", "reddit"] | None,
+) -> list[dict[str, Any]]:
+    platforms = [platform] if platform is not None else ["twitter", "reddit"]
+    actions: list[dict[str, Any]] = []
+    for platform_name in platforms:
+        actions.extend(
+            _read_action_file(
+                simulation_twitter_actions_path(simulation_id)
+                if platform_name == "twitter"
+                else simulation_reddit_actions_path(simulation_id),
+                platform_name,
+            )
+        )
+    return sorted(actions, key=_action_sort_key)
+
+
+def _read_action_file(path: Path, platform: str) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+
+    actions: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            raw_line = line.strip()
+            if not raw_line:
+                continue
+            try:
+                data = json.loads(raw_line)
+                if not isinstance(data, dict):
+                    raise ValueError("action log line must contain a JSON object")
+                action = dict(data)
+                action.setdefault("platform", platform)
+                actions.append(action)
+            except Exception as exc:
+                logger.warning(
+                    "failed to parse action log line %s:%s: %s",
+                    path,
+                    line_number,
+                    exc,
+                )
+    return actions
+
+
+def _action_sort_key(action: dict[str, Any]) -> tuple[int, str, str, int]:
+    try:
+        round_number = int(action.get("round_number") or 0)
+    except (TypeError, ValueError):
+        round_number = 0
+    try:
+        agent_id = int(action.get("agent_id") or 0)
+    except (TypeError, ValueError):
+        agent_id = 0
+    return (
+        round_number,
+        str(action.get("created_at") or ""),
+        str(action.get("platform") or ""),
+        agent_id,
+    )
+
+
 def _to_task_response(task: Task) -> SimulationTaskResponse:
     return SimulationTaskResponse(
         task_id=task.id,
@@ -608,4 +762,36 @@ def _to_start_response(result: SimulationStartResult) -> StartSimulationResponse
         simulation_id=result.simulation_id,
         status=result.status,
         pid=result.pid,
+    )
+
+
+def _to_stop_response(result: SimulationStopResult) -> StopSimulationResponse:
+    return StopSimulationResponse(
+        simulation_id=result.simulation_id,
+        status=result.status,
+        command_id=result.command_id,
+    )
+
+
+def _to_status_response(
+    simulation: Simulation,
+    recent_actions: list[dict[str, Any]],
+) -> SimulationStatusResponse:
+    return SimulationStatusResponse(
+        simulation_id=simulation.id,
+        project_id=simulation.project_id,
+        status=simulation.status,
+        total_rounds=simulation.total_rounds,
+        current_round=simulation.current_round,
+        twitter_enabled=simulation.twitter_enabled,
+        reddit_enabled=simulation.reddit_enabled,
+        twitter_actions_count=simulation.twitter_actions_count,
+        reddit_actions_count=simulation.reddit_actions_count,
+        recent_actions=recent_actions,
+        interactive_ready=simulation.interactive_ready,
+        error=simulation.error,
+        started_at=simulation.started_at,
+        completed_at=simulation.completed_at,
+        created_at=simulation.created_at,
+        updated_at=simulation.updated_at,
     )

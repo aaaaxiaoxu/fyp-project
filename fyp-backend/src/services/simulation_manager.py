@@ -51,11 +51,25 @@ class SimulationStartError(RuntimeError):
         self.detail = detail
 
 
+class SimulationStopError(RuntimeError):
+    def __init__(self, detail: str, *, status_code: int) -> None:
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail
+
+
 @dataclass(frozen=True, slots=True)
 class SimulationStartResult:
     simulation_id: str
     status: str
     pid: int
+
+
+@dataclass(frozen=True, slots=True)
+class SimulationStopResult:
+    simulation_id: str
+    status: str
+    command_id: str
 
 
 class SimulationManager:
@@ -142,13 +156,32 @@ class SimulationManager:
             pid=pid,
         )
 
+    async def stop_simulation(self, simulation_id: str) -> SimulationStopResult:
+        async with SessionLocal() as session:
+            simulation = await simulation_repo.get_simulation_by_id(session, simulation_id)
+
+        if simulation is None:
+            raise SimulationStopError("Simulation not found", status_code=404)
+        if simulation.status != SimulationStatus.RUNNING.value:
+            raise SimulationStopError("Simulation is not running.", status_code=409)
+
+        command = SimulationIPC(simulation_id).write_command(
+            command="stop",
+            payload={"requested_at": datetime.now(timezone.utc).isoformat()},
+        )
+        return SimulationStopResult(
+            simulation_id=simulation_id,
+            status="stop_requested",
+            command_id=command.command_id,
+        )
+
     def run_parallel_simulation(self, simulation_id: str) -> None:
         asyncio.run(self._run_parallel_simulation_async(simulation_id))
 
     async def _run_parallel_simulation_async(self, simulation_id: str) -> None:
         await init_db()
         ipc = SimulationIPC(simulation_id)
-        ipc.initialize_runtime()
+        ipc.initialize_runtime(purge_commands=False)
 
         try:
             async with SessionLocal() as session:
