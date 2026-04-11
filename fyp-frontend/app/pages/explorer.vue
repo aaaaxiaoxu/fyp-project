@@ -3,8 +3,11 @@
     <div class="main-view">
       <header class="app-header">
         <div class="header-left">
-          <div class="brand" @click="router.push('/graph')">SOCIOGRAPH</div>
-          <button class="header-btn subtle" @click="goToSimulation">Back To Simulation</button>
+          <div class="brand" @click="goToGraph">SOCIOGRAPH</div>
+          <div class="header-nav">
+            <button class="header-btn subtle" @click="goToGraph">Back To Graph</button>
+            <button class="header-btn subtle" @click="goToSimulation">Back To Simulation</button>
+          </div>
         </div>
 
         <div class="header-center">
@@ -307,6 +310,7 @@ import { useHead, useRuntimeConfig } from 'nuxt/app'
 import { useRoute, useRouter } from 'vue-router'
 import { getApiErrorMessage, useApiFetch } from '~/composables/useApiFetch'
 import { createExplorerSessionId, parseSseBuffer, type ExplorerSseEvent } from '~/utils/explorerSse'
+import { buildGraphRouteQuery, buildSimulationRouteQuery } from '~/utils/workspaceRoutes'
 
 type ProjectStatus = 'created' | 'ontology_generated' | 'graph_building' | 'graph_completed' | 'failed'
 type RuntimeStatus = 'created' | 'preparing' | 'ready' | 'running' | 'completed' | 'stopped' | 'failed'
@@ -938,15 +942,15 @@ async function readFetchError(response: Response) {
   return (await response.text().catch(() => '')) || `Request failed with status ${response.status}`
 }
 
+function goToGraph() {
+  void router.push({ path: '/graph', query: buildGraphRouteQuery(selectedProjectId.value) })
+}
+
 function goToSimulation() {
-  const query: Record<string, string> = {}
-  if (selectedProjectId.value) {
-    query.project = selectedProjectId.value
-  }
-  if (selectedSimulationId.value) {
-    query.simulation = selectedSimulationId.value
-  }
-  void router.push({ path: '/simulation', query })
+  void router.push({
+    path: '/simulation',
+    query: buildSimulationRouteQuery(selectedProjectId.value, selectedSimulationId.value),
+  })
 }
 
 function syncExplorerQuery() {
@@ -1326,6 +1330,13 @@ function shortenId(value: string) {
 
 .header-right {
   justify-content: flex-end;
+}
+
+.header-nav {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 
 .header-center {

@@ -3,7 +3,7 @@
     <div class="main-view">
       <header class="app-header">
         <div class="header-left">
-          <div class="brand" @click="router.push('/graph')">SOCIOGRAPH</div>
+          <div class="brand" @click="goToGraph">SOCIOGRAPH</div>
           <button class="header-btn subtle" @click="goToGraph">Back To Graph</button>
         </div>
 
@@ -701,6 +701,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { useHead } from 'nuxt/app'
 import { useRoute, useRouter } from 'vue-router'
 import { getApiErrorMessage, useApiFetch } from '~/composables/useApiFetch'
+import { buildGraphRouteQuery } from '~/utils/workspaceRoutes'
 
 type ProjectStatus = 'created' | 'ontology_generated' | 'graph_building' | 'graph_completed' | 'failed'
 type TaskStatus = 'pending' | 'processing' | 'completed' | 'failed'
@@ -1892,11 +1893,7 @@ async function refreshSimulationResults() {
 }
 
 function goToGraph() {
-  const query: Record<string, string> = {}
-  if (selectedProjectId.value) {
-    query.project = selectedProjectId.value
-  }
-  void router.push({ path: '/graph', query })
+  void router.push({ path: '/graph', query: buildGraphRouteQuery(selectedProjectId.value) })
 }
 
 function goToExplorer() {
