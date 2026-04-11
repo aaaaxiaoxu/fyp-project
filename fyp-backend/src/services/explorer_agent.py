@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -13,6 +14,31 @@ ExplorerToolName = Literal["quick_search", "panorama_search", "insight_forge", "
 
 _ALLOWED_SEARCH_TOOLS: tuple[ExplorerToolName, ...] = ("quick_search", "panorama_search", "insight_forge")
 _MAX_OBSERVATION_CHARS = 7000
+_TOOL_NAME_ALIASES: dict[str, ExplorerToolName] = {
+    "quick_search": "quick_search",
+    "quicksearch": "quick_search",
+    "quick": "quick_search",
+    "search": "quick_search",
+    "lookup": "quick_search",
+    "graph_search": "quick_search",
+    "panorama_search": "panorama_search",
+    "panoramasearch": "panorama_search",
+    "panorama": "panorama_search",
+    "overview": "panorama_search",
+    "broad_search": "panorama_search",
+    "historical_search": "panorama_search",
+    "insight_forge": "insight_forge",
+    "insightforge": "insight_forge",
+    "insight": "insight_forge",
+    "analysis": "insight_forge",
+    "impact_analysis": "insight_forge",
+    "causal_analysis": "insight_forge",
+    "interview_agents": "interview_agents",
+    "interview_agent": "interview_agents",
+    "interview": "interview_agents",
+}
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +53,7 @@ class ExplorerRunResult:
     answer: str
     tool_name: str
     tool_result: dict[str, Any]
+    answer_sections: dict[str, list[str]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +61,20 @@ class ToolObservation:
     tool_name: ExplorerToolName
     tool_input: dict[str, Any]
     tool_result: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class AnswerSections:
+    confirmed: list[str]
+    inference: list[str]
+    uncertainty: list[str]
+
+    def to_dict(self) -> dict[str, list[str]]:
+        return {
+            "confirmed": self.confirmed,
+            "inference": self.inference,
+            "uncertainty": self.uncertainty,
+        }
 
 
 class ExplorerAgent:
@@ -76,7 +117,7 @@ class ExplorerAgent:
         base = self._base_event_data(mode)
         events: list[ExplorerEvent] = [ExplorerEvent("status", {**base, "status": "started"})]
         observations: list[ToolObservation] = []
-        final_answer = ""
+        answer_sections: AnswerSections | None = None
 
         if mode == "interview":
             if agent_id is None:
@@ -89,23 +130,30 @@ class ExplorerAgent:
             )
             observations.append(observation)
             self._append_tool_events(events, base, observation, step=1)
-            final_answer = self._generate_final_answer(mode=mode, question=question, observations=observations, agent_id=agent_id)
+            answer_sections = self._generate_final_answer_sections(
+                mode=mode,
+                question=question,
+                observations=observations,
+                agent_id=agent_id,
+            )
             return self._finalize_result(
                 events=events,
                 base=base,
-                answer=final_answer,
+                answer_sections=answer_sections,
                 observations=observations,
                 agent_id=agent_id,
             )
 
         for step in range(1, self.max_tool_steps + 1):
-            decision = self._plan_next_step(question=question, observations=observations)
+            raw_decision = self._plan_next_step(question=question, observations=observations)
+            decision = raw_decision if isinstance(raw_decision, dict) else {}
+            if observations and any(key in decision for key in ("confirmed", "inference", "uncertainty")):
+                answer_sections = _coerce_answer_sections(decision)
+                break
             action = str(decision.get("action") or "tool").strip().lower()
 
             if action == "final" and observations:
-                final_answer = str(decision.get("answer") or "").strip()
-                if final_answer:
-                    break
+                break
             if action == "final" and not observations:
                 decision = {"tool_name": "quick_search", "tool_input": {"query": question, "limit": 10}}
 
@@ -114,13 +162,18 @@ class ExplorerAgent:
             observations.append(observation)
             self._append_tool_events(events, base, observation, step=step)
 
-        if not final_answer:
-            final_answer = self._generate_final_answer(mode=mode, question=question, observations=observations, agent_id=agent_id)
+        if answer_sections is None:
+            answer_sections = self._generate_final_answer_sections(
+                mode=mode,
+                question=question,
+                observations=observations,
+                agent_id=agent_id,
+            )
 
         return self._finalize_result(
             events=events,
             base=base,
-            answer=final_answer,
+            answer_sections=answer_sections,
             observations=observations,
             agent_id=agent_id,
         )
@@ -161,14 +214,29 @@ class ExplorerAgent:
         )
 
     def _tool_from_decision(self, decision: dict[str, Any], question: str) -> tuple[ExplorerToolName, dict[str, Any]]:
-        raw_tool_name = str(decision.get("tool_name") or "").strip()
-        if raw_tool_name not in _ALLOWED_SEARCH_TOOLS:
-            raise ValueError(f"Explorer LLM selected unsupported tool: {raw_tool_name or '<missing>'}")
+        raw_tool_name = decision.get("tool_name") or decision.get("tool") or decision.get("name") or ""
+        normalized_tool_name = _normalize_tool_name(str(raw_tool_name))
+        resolved_tool_name = _TOOL_NAME_ALIASES.get(normalized_tool_name)
+        if resolved_tool_name not in _ALLOWED_SEARCH_TOOLS:
+            resolved_tool_name = self._fallback_search_tool(question)
+            logger.warning(
+                "Explorer Agent falling back to %s for unsupported tool decision %r",
+                resolved_tool_name,
+                decision,
+            )
 
         raw_input = decision.get("tool_input") or {}
         tool_input = dict(raw_input) if isinstance(raw_input, dict) else {}
         tool_input.setdefault("query", question)
-        return raw_tool_name, tool_input  # type: ignore[return-value]
+        return resolved_tool_name, tool_input
+
+    def _fallback_search_tool(self, question: str) -> ExplorerToolName:
+        normalized_question = question.strip().lower()
+        if any(keyword in normalized_question for keyword in ("why", "how", "cause", "impact", "influence", "effect", "关系", "原因", "影响")):
+            return "insight_forge"
+        if any(keyword in normalized_question for keyword in ("overall", "main", "most", "trend", "overview", "summary", "整体", "全局", "概览")):
+            return "panorama_search"
+        return "quick_search"
 
     def _execute_tool(
         self,
@@ -208,28 +276,35 @@ class ExplorerAgent:
             tool_result=result,
         )
 
-    def _generate_final_answer(
+    def _generate_final_answer_sections(
         self,
         *,
         mode: ExplorerMode,
         question: str,
         observations: list[ToolObservation],
         agent_id: int | None,
-    ) -> str:
+    ) -> AnswerSections:
         if mode == "interview":
             system_prompt = (
-                "You are the interviewed simulation agent. Answer in first person using the provided persona, "
-                "recent actions, and graph facts. Do not invent facts not present in the observations. If evidence "
-                "is thin, say what is uncertain. Do not expose chain-of-thought."
+                "You are the interviewed simulation agent. Use first person. Answer only from the provided persona, "
+                "recent actions, and graph facts. Do not invent facts not present in the observations. Do not expose "
+                "chain-of-thought. Return only a JSON object with exactly these keys: confirmed, inference, "
+                "uncertainty. Each key must map to an array of short strings. In confirmed, include only statements "
+                "directly supported by the observations. In inference, include clearly marked interpretations grounded "
+                "in the observations. In uncertainty, state the missing evidence or limits."
             )
         else:
             system_prompt = (
-                "You are Explorer Agent. Answer the user with a concise, evidence-grounded response based on the "
-                "tool observations. Cite or paraphrase concrete graph facts and simulation actions. If the tools "
-                "did not find enough evidence, say that clearly. Do not expose chain-of-thought."
+                "You are Explorer Agent. Answer the user with concise, evidence-grounded statements based on the tool "
+                "observations. Cite or paraphrase concrete graph facts and simulation actions. If the tools did not "
+                "find enough evidence, say that clearly. Do not expose chain-of-thought. Return only a JSON object "
+                "with exactly these keys: confirmed, inference, uncertainty. Each key must map to an array of short "
+                "strings. In confirmed, include only statements directly supported by the tool observations. In "
+                "inference, include clearly marked interpretations grounded in the observations. In uncertainty, state "
+                "the missing evidence, limits, or unresolved points."
             )
 
-        return self._client.chat(
+        payload = self._client.chat_json(
             messages=[
                 {"role": "system", "content": system_prompt},
                 {
@@ -242,13 +317,14 @@ class ExplorerAgent:
                         f"Agent ID: {agent_id if agent_id is not None else 'N/A'}\n"
                         f"Question: {question}\n\n"
                         f"Tool observations:\n{self._observations_for_prompt(observations)}\n\n"
-                        "Write the final answer now."
+                        "Return the JSON object now. Keep confirmed facts separate from inference."
                     ),
                 },
             ],
             temperature=0.35,
             max_tokens=1200,
         )
+        return _coerce_answer_sections(payload)
 
     def _append_tool_events(
         self,
@@ -286,10 +362,11 @@ class ExplorerAgent:
         *,
         events: list[ExplorerEvent],
         base: dict[str, Any],
-        answer: str,
+        answer_sections: AnswerSections,
         observations: list[ToolObservation],
         agent_id: int | None = None,
     ) -> ExplorerRunResult:
+        answer = _render_answer_sections(answer_sections)
         for chunk in self._chunk_answer(answer):
             events.append(ExplorerEvent("answer_chunk", {**base, "chunk": chunk}))
 
@@ -301,12 +378,19 @@ class ExplorerAgent:
                 {
                     **base,
                     "answer": answer,
+                    "answer_sections": answer_sections.to_dict(),
                     "tool_name": tool_name,
                     **({"agent_id": agent_id} if agent_id is not None else {}),
                 },
             )
         )
-        return ExplorerRunResult(events=events, answer=answer, tool_name=tool_name, tool_result=tool_result)
+        return ExplorerRunResult(
+            events=events,
+            answer=answer,
+            tool_name=tool_name,
+            tool_result=tool_result,
+            answer_sections=answer_sections.to_dict(),
+        )
 
     def _base_event_data(self, mode: ExplorerMode) -> dict[str, Any]:
         return {
@@ -368,3 +452,54 @@ def _coerce_bool(value: Any, *, default: bool) -> bool:
         if lowered in {"false", "0", "no", "n"}:
             return False
     return default
+
+
+def _normalize_tool_name(value: str) -> str:
+    return value.strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _coerce_answer_sections(payload: Any) -> AnswerSections:
+    data = payload if isinstance(payload, dict) else {}
+    confirmed = _coerce_string_list(data.get("confirmed"))
+    inference = _coerce_string_list(data.get("inference"))
+    uncertainty = _coerce_string_list(data.get("uncertainty"))
+    if not confirmed and not inference and not uncertainty:
+        uncertainty = ["The model did not return usable structured answer sections."]
+    return AnswerSections(
+        confirmed=confirmed,
+        inference=inference,
+        uncertainty=uncertainty,
+    )
+
+
+def _coerce_string_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        stripped = value.strip()
+        return [stripped] if stripped else []
+    if not isinstance(value, list):
+        return []
+    items: list[str] = []
+    for item in value:
+        text = str(item).strip()
+        if text:
+            items.append(text)
+    return items
+
+
+def _render_answer_sections(sections: AnswerSections) -> str:
+    return "\n\n".join(
+        [
+            _render_answer_section("Confirmed", sections.confirmed),
+            _render_answer_section("Inference", sections.inference),
+            _render_answer_section("Uncertainty", sections.uncertainty),
+        ]
+    ).strip()
+
+
+def _render_answer_section(title: str, items: list[str]) -> str:
+    lines = [f"## {title}"]
+    if items:
+        lines.extend(f"- {item}" for item in items)
+    else:
+        lines.append("- No evidence returned.")
+    return "\n".join(lines)

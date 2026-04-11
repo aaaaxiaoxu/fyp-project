@@ -92,6 +92,7 @@ class ExplorerTurnResponse(BaseModel):
     mode: str
     question: str
     answer: str
+    answer_sections: dict[str, list[str]] | None = None
     agent_id: int | None = None
     tool_name: str
     created_at: str
@@ -278,6 +279,7 @@ async def _persist_turn(
         "mode": mode,
         "question": question,
         "answer": result.answer,
+        "answer_sections": result.answer_sections,
         "agent_id": agent_id,
         "tool_name": result.tool_name,
         "tool_result": result.tool_result,
@@ -327,6 +329,7 @@ def _error_result(
         answer="",
         tool_name="error",
         tool_result={"error": data["message"]},
+        answer_sections=None,
     )
 
 
@@ -446,9 +449,28 @@ def _read_turns(log_path: str | None) -> list[dict[str, Any]]:
                     "mode": str(payload.get("mode") or ""),
                     "question": str(payload.get("question") or ""),
                     "answer": str(payload.get("answer") or ""),
+                    "answer_sections": _coerce_answer_sections(payload.get("answer_sections")),
                     "agent_id": payload.get("agent_id"),
                     "tool_name": str(payload.get("tool_name") or ""),
                     "created_at": str(payload.get("created_at") or ""),
                 }
             )
     return turns
+
+
+def _coerce_answer_sections(payload: Any) -> dict[str, list[str]] | None:
+    if not isinstance(payload, dict):
+        return None
+
+    sections = {
+        key: [str(item).strip() for item in value if str(item).strip()]
+        for key, value in payload.items()
+        if key in {"confirmed", "inference", "uncertainty"} and isinstance(value, list)
+    }
+    if not sections:
+        return None
+    return {
+        "confirmed": sections.get("confirmed", []),
+        "inference": sections.get("inference", []),
+        "uncertainty": sections.get("uncertainty", []),
+    }

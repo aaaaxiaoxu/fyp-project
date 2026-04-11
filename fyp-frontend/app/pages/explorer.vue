@@ -199,7 +199,29 @@
                 <span>{{ message.role === 'user' ? 'Operator' : 'Explorer Agent' }}</span>
                 <span>{{ formatTime(message.createdAt) }}</span>
               </div>
-              <p class="message-content">{{ message.content || (message.status === 'streaming' ? 'Streaming response...' : '') }}</p>
+              <p v-if="message.role === 'user'" class="message-content">
+                {{ message.content || (message.status === 'streaming' ? 'Streaming response...' : '') }}
+              </p>
+              <div v-else-if="message.answerSections" class="message-content sectioned-answer">
+                <section
+                  v-for="section in answerSectionOrder"
+                  :key="section.key"
+                  class="answer-section"
+                >
+                  <h3>{{ section.label }}</h3>
+                  <ul v-if="message.answerSections[section.key].length">
+                    <li v-for="item in message.answerSections[section.key]" :key="`${section.key}:${item}`">
+                      {{ item }}
+                    </li>
+                  </ul>
+                  <p v-else>No evidence returned.</p>
+                </section>
+              </div>
+              <div
+                v-else
+                class="message-content markdown-body"
+                v-html="renderAssistantContent(message.content || (message.status === 'streaming' ? 'Streaming response...' : ''))"
+              ></div>
 
               <div v-if="message.events.length" class="event-timeline">
                 <div v-for="event in message.events" :key="event.key" class="event-chip" :class="event.event">
@@ -350,6 +372,7 @@ type ExplorerTurn = {
   mode: ExplorerMode | string
   question: string
   answer: string
+  answer_sections?: AnswerSections | null
   agent_id: number | null
   tool_name: string
   created_at: string
@@ -382,10 +405,15 @@ type ChatEvent = ExplorerSseEvent & {
   key: string
 }
 
+type AnswerSectionKey = 'confirmed' | 'inference' | 'uncertainty'
+
+type AnswerSections = Record<AnswerSectionKey, string[]>
+
 type ChatMessage = {
   id: string
   role: 'user' | 'assistant'
   content: string
+  answerSections: AnswerSections | null
   createdAt: string
   status: 'done' | 'streaming' | 'error'
   events: ChatEvent[]
@@ -436,6 +464,12 @@ const toolCards = [
   { name: 'panorama_search', description: 'broad active and historical view' },
   { name: 'insight_forge', description: 'impact and cause analysis' },
   { name: 'interview_agents', description: 'persona-grounded agent answer' },
+]
+
+const answerSectionOrder: Array<{ key: AnswerSectionKey; label: string }> = [
+  { key: 'confirmed', label: 'Confirmed' },
+  { key: 'inference', label: 'Inference' },
+  { key: 'uncertainty', label: 'Uncertainty' },
 ]
 
 const selectedProject = computed(() => {
@@ -727,6 +761,7 @@ function loadSessionMessages(session: ExplorerHistorySession) {
       id: `${turn.turn_id}:question`,
       role: 'user' as const,
       content: turn.question,
+      answerSections: null,
       createdAt: turn.created_at,
       status: 'done' as const,
       events: [],
@@ -735,6 +770,7 @@ function loadSessionMessages(session: ExplorerHistorySession) {
       id: `${turn.turn_id}:answer`,
       role: 'assistant' as const,
       content: turn.answer,
+      answerSections: normalizeAnswerSections(turn.answer_sections),
       createdAt: turn.created_at,
       status: 'done' as const,
       events: [
@@ -763,6 +799,7 @@ async function submitExplorerMessage() {
     id: `user:${Date.now()}`,
     role: 'user',
     content: text,
+    answerSections: null,
     createdAt: new Date().toISOString(),
     status: 'done',
     events: [],
@@ -771,6 +808,7 @@ async function submitExplorerMessage() {
     id: `assistant:${Date.now()}`,
     role: 'assistant',
     content: '',
+    answerSections: null,
     createdAt: new Date().toISOString(),
     status: 'streaming',
     events: [],
@@ -872,10 +910,12 @@ function handleStreamEvent(messageId: string, event: ExplorerSseEvent) {
     message.content += stringField(event.data, 'chunk')
   } else if (event.event === 'final_answer') {
     message.content = stringField(event.data, 'answer') || message.content
+    message.answerSections = normalizeAnswerSections(event.data.answer_sections)
     message.status = 'done'
   } else if (event.event === 'error') {
     message.status = 'error'
     message.content = stringField(event.data, 'message') || 'Explorer failed.'
+    message.answerSections = null
     streamError.value = message.content
   }
 
@@ -994,6 +1034,131 @@ function scrollTranscript() {
   })
 }
 
+function renderAssistantContent(content: string) {
+  return renderMarkdown(content)
+}
+
+function renderMarkdown(content: string) {
+  const normalized = content.replace(/\r\n/g, '\n').trim()
+  if (!normalized) {
+    return '<p></p>'
+  }
+
+  const codeBlocks: string[] = []
+  const source = normalized.replace(/```(?:[\w-]+)?\n?([\s\S]*?)```/g, (_, code: string) => {
+    codeBlocks.push(`<pre><code>${escapeHtml(code.trimEnd())}</code></pre>`)
+    return `@@CODEBLOCK_${codeBlocks.length - 1}@@`
+  })
+
+  const lines = source.split('\n')
+  const blocks: string[] = []
+  let index = 0
+
+  while (index < lines.length) {
+    const trimmed = lines[index].trim()
+    if (!trimmed) {
+      index += 1
+      continue
+    }
+
+    const codeMatch = trimmed.match(/^@@CODEBLOCK_(\d+)@@$/)
+    if (codeMatch) {
+      blocks.push(codeBlocks[Number(codeMatch[1])] || '')
+      index += 1
+      continue
+    }
+
+    const headingMatch = trimmed.match(/^(#{1,3})\s+(.*)$/)
+    if (headingMatch) {
+      const level = Math.min(headingMatch[1].length, 3)
+      blocks.push(`<h${level}>${renderInlineMarkdown(headingMatch[2])}</h${level}>`)
+      index += 1
+      continue
+    }
+
+    if (/^[-*]\s+/.test(trimmed)) {
+      const items: string[] = []
+      while (index < lines.length) {
+        const match = lines[index].trim().match(/^[-*]\s+(.*)$/)
+        if (!match) {
+          break
+        }
+        items.push(`<li>${renderInlineMarkdown(match[1])}</li>`)
+        index += 1
+      }
+      blocks.push(`<ul>${items.join('')}</ul>`)
+      continue
+    }
+
+    if (/^\d+\.\s+/.test(trimmed)) {
+      const items: string[] = []
+      while (index < lines.length) {
+        const match = lines[index].trim().match(/^\d+\.\s+(.*)$/)
+        if (!match) {
+          break
+        }
+        items.push(`<li>${renderInlineMarkdown(match[1])}</li>`)
+        index += 1
+      }
+      blocks.push(`<ol>${items.join('')}</ol>`)
+      continue
+    }
+
+    if (/^>\s?/.test(trimmed)) {
+      const quoteLines: string[] = []
+      while (index < lines.length) {
+        const match = lines[index].trim().match(/^>\s?(.*)$/)
+        if (!match) {
+          break
+        }
+        quoteLines.push(renderInlineMarkdown(match[1]))
+        index += 1
+      }
+      blocks.push(`<blockquote><p>${quoteLines.join('<br>')}</p></blockquote>`)
+      continue
+    }
+
+    const paragraphLines: string[] = []
+    while (index < lines.length) {
+      const current = lines[index].trim()
+      if (
+        !current ||
+        /^@@CODEBLOCK_\d+@@$/.test(current) ||
+        /^(#{1,3})\s+/.test(current) ||
+        /^[-*]\s+/.test(current) ||
+        /^\d+\.\s+/.test(current) ||
+        /^>\s?/.test(current)
+      ) {
+        break
+      }
+      paragraphLines.push(lines[index].trim())
+      index += 1
+    }
+    blocks.push(`<p>${renderInlineMarkdown(paragraphLines.join(' '))}</p>`)
+  }
+
+  return blocks.join('')
+}
+
+function renderInlineMarkdown(content: string) {
+  let escaped = escapeHtml(content)
+  escaped = escaped.replace(/`([^`]+)`/g, '<code>$1</code>')
+  escaped = escaped.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+  escaped = escaped.replace(/__([^_]+)__/g, '<strong>$1</strong>')
+  escaped = escaped.replace(/\*([^*\n]+)\*/g, '<em>$1</em>')
+  escaped = escaped.replace(/_([^_\n]+)_/g, '<em>$1</em>')
+  return escaped
+}
+
+function escapeHtml(content: string) {
+  return content
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
 function normalizeApiError(error: unknown) {
   if (error instanceof Error) {
     return error.message
@@ -1070,6 +1235,31 @@ function stringField(data: Record<string, unknown>, key: string) {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
+}
+
+function normalizeAnswerSections(value: unknown): AnswerSections | null {
+  if (!isRecord(value)) {
+    return null
+  }
+
+  const readSection = (key: AnswerSectionKey) => {
+    const raw = value[key]
+    if (!Array.isArray(raw)) {
+      return []
+    }
+    return raw.map((item) => String(item).trim()).filter(Boolean)
+  }
+
+  const sections: AnswerSections = {
+    confirmed: readSection('confirmed'),
+    inference: readSection('inference'),
+    uncertainty: readSection('uncertainty'),
+  }
+
+  if (!sections.confirmed.length && !sections.inference.length && !sections.uncertainty.length) {
+    return null
+  }
+  return sections
 }
 
 function formatTime(value: string) {
@@ -1687,9 +1877,102 @@ function shortenId(value: string) {
 }
 
 .message-content {
-  white-space: pre-wrap;
   line-height: 1.58;
   margin: 0;
+}
+
+.sectioned-answer {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.answer-section h3 {
+  margin: 0 0 8px;
+  font-size: 0.92rem;
+  font-weight: 900;
+}
+
+.answer-section ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.answer-section li + li {
+  margin-top: 6px;
+}
+
+.answer-section p {
+  margin: 0;
+  color: #666;
+}
+
+.markdown-body > :first-child {
+  margin-top: 0;
+}
+
+.markdown-body > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3 {
+  margin: 0 0 10px;
+  font-size: 1rem;
+  line-height: 1.35;
+}
+
+.markdown-body p {
+  margin: 0 0 12px;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  margin: 0 0 12px;
+  padding-left: 20px;
+}
+
+.markdown-body li + li {
+  margin-top: 6px;
+}
+
+.markdown-body strong {
+  font-weight: 800;
+}
+
+.markdown-body em {
+  font-style: italic;
+}
+
+.markdown-body code {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.85em;
+  background: rgba(17, 17, 17, 0.06);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.markdown-body pre {
+  margin: 0 0 12px;
+  padding: 12px;
+  border: 1px solid #ececec;
+  border-radius: 8px;
+  background: #fafafa;
+  overflow: auto;
+}
+
+.markdown-body pre code {
+  background: transparent;
+  border-radius: 0;
+  padding: 0;
+}
+
+.markdown-body blockquote {
+  margin: 0 0 12px;
+  padding-left: 12px;
+  border-left: 3px solid #d8d8d8;
+  color: #555;
 }
 
 .event-timeline {
