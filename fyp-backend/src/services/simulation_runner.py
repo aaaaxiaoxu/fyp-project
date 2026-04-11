@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -66,10 +67,49 @@ class SimulationRunner:
         self.reddit_enabled = reddit_enabled
 
         self.agent_configs: list[dict[str, Any]] = list(config.get("agent_configs") or [])
+        self.time_config: dict[str, Any] = dict(config.get("time_config") or {})
         self.hot_topics: list[str] = list(((config.get("event_config") or {}).get("hot_topics")) or [])
         self.twitter_actions: list[str] = list(((config.get("twitter_config") or {}).get("available_actions")) or [])
         self.reddit_actions: list[str] = list(((config.get("reddit_config") or {}).get("available_actions")) or [])
         self.initial_posts: list[dict[str, Any]] = list(((config.get("event_config") or {}).get("initial_posts")) or [])
+        self.scheduled_events: list[dict[str, Any]] = list(((config.get("event_config") or {}).get("scheduled_events")) or [])
+        self.minutes_per_round = _coerce_positive_int(self.time_config.get("minutes_per_round"), default=60)
+        self.agents_per_hour_min = _coerce_positive_int(self.time_config.get("agents_per_hour_min"), default=1)
+        self.agents_per_hour_max = max(
+            self.agents_per_hour_min,
+            _coerce_positive_int(self.time_config.get("agents_per_hour_max"), default=max(1, len(self.agent_configs))),
+        )
+        raw_active_agent_cap = self.time_config.get("active_agent_cap")
+        self.active_agent_cap = (
+            max(1, int(raw_active_agent_cap))
+            if isinstance(raw_active_agent_cap, (int, float)) and int(raw_active_agent_cap) > 0
+            else None
+        )
+        self.peak_hours = _normalize_hours(self.time_config.get("peak_hours"))
+        self.off_peak_hours = _normalize_hours(self.time_config.get("off_peak_hours"))
+        self.morning_hours = _normalize_hours(self.time_config.get("morning_hours"))
+        self.work_hours = _normalize_hours(self.time_config.get("work_hours"))
+        self.peak_activity_multiplier = _coerce_float(
+            self.time_config.get("peak_activity_multiplier"),
+            default=1.5,
+        )
+        self.off_peak_activity_multiplier = _coerce_float(
+            self.time_config.get("off_peak_activity_multiplier"),
+            default=0.08,
+        )
+        self.morning_activity_multiplier = _coerce_float(
+            self.time_config.get("morning_activity_multiplier"),
+            default=0.45,
+        )
+        self.work_activity_multiplier = _coerce_float(
+            self.time_config.get("work_activity_multiplier"),
+            default=0.8,
+        )
+        self._scheduled_event_rounds = {
+            _coerce_positive_int(event.get("round"), default=0)
+            for event in self.scheduled_events
+            if isinstance(event, dict) and _coerce_positive_int(event.get("round"), default=0) > 0
+        }
         self.external_profiles_by_id: dict[int, dict[str, Any]] = {
             int(profile.get("user_id") or 0): profile
             for profile in self.profiles
@@ -81,6 +121,7 @@ class SimulationRunner:
         self._external_to_internal_agent_id: dict[int, int] = {}
         self._internal_to_external_agent_id: dict[int, int] = {}
         self._oasis_agent_configs: list[dict[str, Any]] = []
+        self._oasis_agent_configs_by_internal_id: dict[int, dict[str, Any]] = {}
         for agent_cfg in self.agent_configs:
             external_agent_id = int(agent_cfg.get("agent_id") or 0)
             if external_agent_id <= 0:
@@ -96,13 +137,13 @@ class SimulationRunner:
             internal_agent_id = len(self._oasis_agent_configs)
             self._external_to_internal_agent_id[external_agent_id] = internal_agent_id
             self._internal_to_external_agent_id[internal_agent_id] = external_agent_id
-            self._oasis_agent_configs.append(
-                {
-                    **agent_cfg,
-                    "agent_id": internal_agent_id,
-                    "external_agent_id": external_agent_id,
-                }
-            )
+            normalized_config = {
+                **agent_cfg,
+                "agent_id": internal_agent_id,
+                "external_agent_id": external_agent_id,
+            }
+            self._oasis_agent_configs.append(normalized_config)
+            self._oasis_agent_configs_by_internal_id[internal_agent_id] = normalized_config
 
         # OASIS runtime state — populated by setup()
         self._twitter_env: oasis.environment.env.OasisEnv | None = None
@@ -192,8 +233,13 @@ class SimulationRunner:
         reddit_actions: list[dict[str, Any]] = []
 
         if self._twitter_env is not None and self._twitter_agents:
-            actions_dict = _build_actions_dict(
+            selected_agents = self._select_agents_for_round(
                 agents=self._twitter_agents,
+                platform="twitter",
+                round_number=round_number,
+            )
+            actions_dict = _build_actions_dict(
+                agents=selected_agents,
                 platform="twitter",
                 round_number=round_number,
                 initial_posts=self.initial_posts,
@@ -216,8 +262,13 @@ class SimulationRunner:
                 ]
 
         if self._reddit_env is not None and self._reddit_agents:
-            actions_dict = _build_actions_dict(
+            selected_agents = self._select_agents_for_round(
                 agents=self._reddit_agents,
+                platform="reddit",
+                round_number=round_number,
+            )
+            actions_dict = _build_actions_dict(
+                agents=selected_agents,
                 platform="reddit",
                 round_number=round_number,
                 initial_posts=self.initial_posts,
@@ -289,6 +340,109 @@ class SimulationRunner:
                 "oasis_info": info,
             },
         }
+
+    def _select_agents_for_round(
+        self,
+        *,
+        agents: list[SocialAgent],
+        platform: str,
+        round_number: int,
+    ) -> list[SocialAgent]:
+        if not agents:
+            return []
+
+        round_hour = self._round_hour(round_number)
+        activity_multiplier = self._activity_multiplier(round_hour)
+        count_rng = random.Random(f"{self.simulation_id}:{platform}:{round_number}:count")
+
+        scaled_min = max(1, int(round(self.agents_per_hour_min * activity_multiplier)))
+        scaled_max = max(scaled_min, int(round(self.agents_per_hour_max * activity_multiplier)))
+        if round_number in self._scheduled_event_rounds:
+            scaled_min = max(scaled_min, int(round(scaled_min * 1.2)))
+            scaled_max = max(scaled_min, int(round(scaled_max * 1.35)))
+        if self.active_agent_cap is not None:
+            scaled_max = min(scaled_max, self.active_agent_cap)
+
+        scaled_max = min(scaled_max, len(agents))
+        scaled_min = min(scaled_min, scaled_max)
+        target_count = count_rng.randint(scaled_min, scaled_max) if scaled_max > 0 else 0
+
+        required_internal_ids = self._required_internal_agent_ids(platform=platform, round_number=round_number)
+        target_count = min(len(agents), max(target_count, len(required_internal_ids)))
+
+        scored_agents: list[tuple[float, int, SocialAgent]] = []
+        for agent in agents:
+            internal_agent_id = int(agent.social_agent_id)
+            score = self._agent_activity_score(
+                internal_agent_id=internal_agent_id,
+                platform=platform,
+                round_number=round_number,
+                round_hour=round_hour,
+            )
+            if internal_agent_id in required_internal_ids:
+                score += 1_000.0
+            scored_agents.append((score, internal_agent_id, agent))
+
+        scored_agents.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        selected_agents = [agent for _, _, agent in scored_agents[:target_count]]
+        logger.info(
+            "round %s sim %s platform=%s selected=%s/%s hour=%s multiplier=%.2f",
+            round_number,
+            self.simulation_id,
+            platform,
+            len(selected_agents),
+            len(agents),
+            round_hour,
+            activity_multiplier,
+        )
+        return selected_agents
+
+    def _agent_activity_score(
+        self,
+        *,
+        internal_agent_id: int,
+        platform: str,
+        round_number: int,
+        round_hour: int,
+    ) -> float:
+        config = self._oasis_agent_configs_by_internal_id.get(internal_agent_id, {})
+        activity_level = _coerce_float(config.get("activity_level"), default=0.55)
+        influence_weight = min(3.0, max(0.5, _coerce_float(config.get("influence_weight"), default=1.0)))
+        posts_per_hour = _coerce_float(config.get("posts_per_hour"), default=0.5)
+        comments_per_hour = _coerce_float(config.get("comments_per_hour"), default=0.5)
+        active_hours = _normalize_hours(config.get("active_hours"))
+        hour_factor = 1.0 if not active_hours or round_hour in active_hours else 0.14
+        throughput_factor = min(1.2, (posts_per_hour + comments_per_hour) / 3.5)
+        jitter = random.Random(f"{self.simulation_id}:{platform}:{round_number}:{internal_agent_id}").random() * 0.35
+        return (activity_level * hour_factor * influence_weight) + throughput_factor + jitter
+
+    def _required_internal_agent_ids(self, *, platform: str, round_number: int) -> set[int]:
+        required: set[int] = set()
+        if round_number != 1:
+            return required
+        for post in self.initial_posts:
+            if str(post.get("platform") or "") != platform:
+                continue
+            external_agent_id = int(post.get("poster_agent_id") or 0)
+            internal_agent_id = self._external_to_internal_agent_id.get(external_agent_id)
+            if internal_agent_id is not None:
+                required.add(internal_agent_id)
+        return required
+
+    def _round_hour(self, round_number: int) -> int:
+        elapsed_minutes = max(0, round_number - 1) * self.minutes_per_round
+        return int((elapsed_minutes // 60) % 24)
+
+    def _activity_multiplier(self, round_hour: int) -> float:
+        if round_hour in self.peak_hours:
+            return self.peak_activity_multiplier
+        if round_hour in self.off_peak_hours:
+            return self.off_peak_activity_multiplier
+        if round_hour in self.morning_hours:
+            return self.morning_activity_multiplier
+        if round_hour in self.work_hours:
+            return self.work_activity_multiplier
+        return 1.0
 
 
 # ------------------------------------------------------------------
@@ -450,6 +604,35 @@ def _build_oasis_other_info(*, profile: dict[str, Any], persona: str) -> dict[st
         "mbti": mbti,
         "country": country,
     }
+
+
+def _coerce_positive_int(value: Any, *, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _coerce_float(value: Any, *, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_hours(value: Any) -> set[int]:
+    if not isinstance(value, list):
+        return set()
+    hours: set[int] = set()
+    for item in value:
+        try:
+            hour = int(item)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= hour <= 23:
+            hours.add(hour)
+    return hours
 
 
 def _try_delete(path: Path) -> None:

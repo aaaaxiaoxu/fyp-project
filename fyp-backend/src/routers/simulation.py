@@ -10,7 +10,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..adapters import TaskStateWriter
@@ -65,6 +65,8 @@ class PrepareSimulationRequest(BaseModel):
     use_llm_for_config: bool = True
     twitter_enabled: bool = True
     reddit_enabled: bool = True
+    total_rounds: int | None = Field(default=None, ge=1, le=240)
+    active_agent_cap: int | None = Field(default=None, ge=1, le=5000)
 
     @field_validator("entity_types")
     @classmethod
@@ -180,6 +182,8 @@ async def prepare_simulation(
         use_llm_for_config=request.use_llm_for_config,
         twitter_enabled=request.twitter_enabled,
         reddit_enabled=request.reddit_enabled,
+        total_rounds=request.total_rounds,
+        active_agent_cap=request.active_agent_cap,
     )
     return CreatePrepareTaskResponse(task_id=task.id)
 
@@ -318,6 +322,8 @@ def _schedule_prepare_task(
     use_llm_for_config: bool,
     twitter_enabled: bool,
     reddit_enabled: bool,
+    total_rounds: int | None,
+    active_agent_cap: int | None,
 ) -> None:
     task = asyncio.create_task(
         _run_prepare_task(
@@ -328,6 +334,8 @@ def _schedule_prepare_task(
             use_llm_for_config=use_llm_for_config,
             twitter_enabled=twitter_enabled,
             reddit_enabled=reddit_enabled,
+            total_rounds=total_rounds,
+            active_agent_cap=active_agent_cap,
         )
     )
     _BACKGROUND_TASKS.add(task)
@@ -351,6 +359,8 @@ async def _run_prepare_task(
     use_llm_for_config: bool,
     twitter_enabled: bool,
     reddit_enabled: bool,
+    total_rounds: int | None,
+    active_agent_cap: int | None,
 ) -> None:
     simulation_id = _new_simulation_id()
 
@@ -462,6 +472,8 @@ async def _run_prepare_task(
             twitter_enabled,
             reddit_enabled,
             use_llm_for_config,
+            total_rounds,
+            active_agent_cap,
             config_progress,
         )
         await asyncio.to_thread(_write_simulation_config_artifact, simulation_id, config)
@@ -492,6 +504,8 @@ async def _run_prepare_task(
             "entity_types": filtered_entities.to_dict()["entity_types"],
             "config_path": simulation.config_path,
             "profiles_dir": simulation.profiles_dir,
+            "total_rounds": total_rounds,
+            "active_agent_cap": active_agent_cap,
         }
         await _update_task_state(
             task_id,
@@ -590,6 +604,8 @@ def _generate_simulation_config_sync(
     twitter_enabled: bool,
     reddit_enabled: bool,
     use_llm_for_config: bool,
+    total_rounds: int | None,
+    active_agent_cap: int | None,
     progress_callback,
 ) -> SimulationParameters:
     generator = SimulationConfigGenerator()
@@ -604,6 +620,8 @@ def _generate_simulation_config_sync(
         enable_twitter=twitter_enabled,
         enable_reddit=reddit_enabled,
         use_llm=use_llm_for_config,
+        total_rounds_override=total_rounds,
+        active_agent_cap=active_agent_cap,
         progress_callback=progress_callback,
     )
 

@@ -110,26 +110,34 @@
             <div class="agent-stack">
               <div class="stack-head">
                 <span class="section-kicker">Interview Agents</span>
-                <span>{{ profiles.length }}</span>
+                <span>{{ filteredProfiles.length }} / {{ profiles.length }}</span>
               </div>
               <div v-if="profilesError" class="inline-note danger">
                 {{ profilesError }}
               </div>
-              <button
-                v-for="profile in visibleProfiles"
-                :key="profile.user_id"
-                class="agent-row"
-                :class="{ active: profile.user_id === selectedAgentId }"
-                @click="selectAgent(profile.user_id)"
-              >
-                <span class="agent-avatar mono">{{ profile.user_id }}</span>
-                <span class="agent-copy">
-                  <strong>{{ profile.name || profile.username || `Agent ${profile.user_id}` }}</strong>
-                  <small>{{ profile.source_entity_type || profile.profession || 'simulation persona' }}</small>
-                </span>
-              </button>
-              <div v-if="profiles.length > visibleProfiles.length" class="inline-note">
-                Showing {{ visibleProfiles.length }} of {{ profiles.length }} agents.
+              <input
+                v-model.trim="agentSearch"
+                type="search"
+                class="agent-search"
+                placeholder="Search name, @username, role, topic, type"
+              />
+              <div class="agent-list">
+                <button
+                  v-for="profile in filteredProfiles"
+                  :key="profile.user_id"
+                  class="agent-row"
+                  :class="{ active: profile.user_id === selectedAgentId }"
+                  @click="selectAgent(profile.user_id)"
+                >
+                  <span class="agent-avatar mono">{{ profile.user_id }}</span>
+                  <span class="agent-copy">
+                    <strong>{{ profile.name || profile.username || `Agent ${profile.user_id}` }}</strong>
+                    <small>{{ profile.source_entity_type || profile.profession || 'simulation persona' }}</small>
+                  </span>
+                </button>
+              </div>
+              <div v-if="agentSearch && !filteredProfiles.length" class="inline-note">
+                No agents match "{{ agentSearch }}".
               </div>
             </div>
           </div>
@@ -438,8 +446,31 @@ const selectedAgent = computed(() => {
   return profiles.value.find((profile) => profile.user_id === selectedAgentId.value) || null
 })
 
-const visibleProfiles = computed(() => {
-  return profiles.value.slice(0, 16)
+const agentSearch = ref('')
+
+const filteredProfiles = computed(() => {
+  const query = agentSearch.value.trim().toLowerCase()
+  if (!query) {
+    return profiles.value
+  }
+
+  return profiles.value.filter((profile) => {
+    const haystack = [
+      String(profile.user_id),
+      profile.name,
+      profile.username,
+      profile.profession,
+      profile.source_entity_type,
+      profile.bio,
+      profile.persona,
+      ...(profile.interested_topics || []),
+    ]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase()
+
+    return haystack.includes(query)
+  })
 })
 
 const selectedHistorySession = computed(() => {
@@ -1342,6 +1373,7 @@ function shortenId(value: string) {
 }
 
 .restore-input,
+.agent-search,
 .agent-select,
 .composer textarea {
   width: 100%;
@@ -1356,6 +1388,12 @@ function shortenId(value: string) {
   padding: 10px 12px;
   font-family: "JetBrains Mono", monospace;
   font-size: 0.78rem;
+}
+
+.agent-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .metric-grid {
@@ -1404,10 +1442,23 @@ function shortenId(value: string) {
 .stack-head {
   display: flex;
   justify-content: space-between;
-  margin-bottom: 12px;
   color: #777;
   font-size: 0.78rem;
   font-weight: 800;
+}
+
+.agent-search {
+  padding: 10px 12px;
+  font-size: 0.84rem;
+}
+
+.agent-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: clamp(320px, 44vh, 760px);
+  overflow: auto;
+  padding-right: 4px;
 }
 
 .project-row,
@@ -1421,7 +1472,6 @@ function shortenId(value: string) {
   color: #111;
   text-align: left;
   padding: 12px;
-  margin-bottom: 8px;
   transition: border 0.18s ease, background 0.18s ease, transform 0.18s ease;
 }
 

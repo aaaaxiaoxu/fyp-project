@@ -50,6 +50,7 @@ class TimeSimulationConfig:
     minutes_per_round: int
     agents_per_hour_min: int
     agents_per_hour_max: int
+    active_agent_cap: int | None = None
     peak_hours: list[int] = field(default_factory=lambda: [19, 20, 21, 22])
     peak_activity_multiplier: float = 1.5
     off_peak_hours: list[int] = field(default_factory=lambda: [0, 1, 2, 3, 4, 5])
@@ -136,6 +137,8 @@ class SimulationConfigGenerator:
         enable_twitter: bool = True,
         enable_reddit: bool = True,
         use_llm: bool = True,
+        total_rounds_override: int | None = None,
+        active_agent_cap: int | None = None,
         progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> SimulationParameters:
         if progress_callback is not None:
@@ -150,6 +153,8 @@ class SimulationConfigGenerator:
             profiles=profiles,
             enable_twitter=enable_twitter,
             enable_reddit=enable_reddit,
+            total_rounds_override=total_rounds_override,
+            active_agent_cap=active_agent_cap,
         )
 
         reasoning = "heuristic defaults"
@@ -177,6 +182,12 @@ class SimulationConfigGenerator:
                 reasoning = "llm refined"
             except Exception:
                 reasoning = "heuristic defaults (llm fallback)"
+
+        defaults = self._apply_runtime_constraints(
+            defaults,
+            total_rounds_override=total_rounds_override,
+            active_agent_cap=active_agent_cap,
+        )
 
         if progress_callback is not None:
             progress_callback(3, 3, "finalizing simulation config")
@@ -207,22 +218,40 @@ class SimulationConfigGenerator:
         profiles: list[OasisAgentProfile],
         enable_twitter: bool,
         enable_reddit: bool,
+        total_rounds_override: int | None,
+        active_agent_cap: int | None,
     ) -> dict[str, Any]:
         entity_count = max(1, len(entities))
-        total_hours = min(72, max(24, 12 + entity_count * 2))
         minutes_per_round = 60
-        total_rounds = max(1, math.ceil(total_hours * 60 / minutes_per_round))
+        if total_rounds_override is not None:
+            total_rounds = max(1, int(total_rounds_override))
+            total_hours = total_rounds
+        else:
+            total_hours = min(72, max(24, 12 + entity_count * 2))
+            total_rounds = max(1, math.ceil(total_hours * 60 / minutes_per_round))
         per_hour_max = min(entity_count, max(3, math.ceil(entity_count * 0.35)))
         per_hour_min = min(per_hour_max, max(1, math.floor(per_hour_max * 0.5)))
+        capped_active_agents: int | None = None
+        if active_agent_cap is not None:
+            capped_active_agents = min(entity_count, max(1, int(active_agent_cap)))
+            per_hour_max = min(per_hour_max, capped_active_agents)
+            per_hour_min = min(per_hour_min, max(1, math.floor(per_hour_max * 0.5)))
 
         time_config = TimeSimulationConfig(
             total_simulation_hours=total_hours,
             minutes_per_round=minutes_per_round,
             agents_per_hour_min=per_hour_min,
             agents_per_hour_max=per_hour_max,
+            active_agent_cap=capped_active_agents,
         )
         agent_configs = [self._build_agent_config(profile) for profile in profiles]
-        event_config = self._build_event_config(simulation_requirement, profiles, total_rounds)
+        event_config = self._build_event_config(
+            simulation_requirement,
+            profiles,
+            total_rounds,
+            enable_twitter=enable_twitter,
+            enable_reddit=enable_reddit,
+        )
         twitter_config = (
             PlatformConfig(
                 platform="twitter",
@@ -291,6 +320,9 @@ class SimulationConfigGenerator:
         simulation_requirement: str,
         profiles: list[OasisAgentProfile],
         total_rounds: int,
+        *,
+        enable_twitter: bool,
+        enable_reddit: bool,
     ) -> EventConfig:
         hot_topics: list[str] = []
         for profile in profiles:
@@ -302,13 +334,23 @@ class SimulationConfigGenerator:
             if len(hot_topics) >= 6:
                 break
 
+        enabled_platforms: list[str] = []
+        if enable_twitter:
+            enabled_platforms.append("twitter")
+        if enable_reddit:
+            enabled_platforms.append("reddit")
+        if not enabled_platforms:
+            enabled_platforms.append("twitter")
+
         initial_posts: list[dict[str, Any]] = []
-        for profile in sorted(profiles, key=lambda item: item.follower_count, reverse=True)[: min(3, len(profiles))]:
+        for index, profile in enumerate(
+            sorted(profiles, key=lambda item: item.follower_count, reverse=True)[: min(3, len(profiles))]
+        ):
             topic = hot_topics[0] if hot_topics else "public discussion"
             initial_posts.append(
                 {
                     "poster_agent_id": profile.user_id,
-                    "platform": "twitter",
+                    "platform": enabled_platforms[index % len(enabled_platforms)],
                     "topic": topic,
                     "content": f"{profile.name} kicks off a discussion about {topic} around the requirement: {simulation_requirement[:120]}",
                 }
@@ -379,4 +421,54 @@ class SimulationConfigGenerator:
             current.update({field: value for field, value in config_overrides.items() if field in current})
             merged[key] = PlatformConfig(**current)
 
+        return merged
+
+    def _apply_runtime_constraints(
+        self,
+        defaults: dict[str, Any],
+        *,
+        total_rounds_override: int | None,
+        active_agent_cap: int | None,
+    ) -> dict[str, Any]:
+        merged = dict(defaults)
+
+        time_config = asdict(merged["time_config"])
+        if total_rounds_override is not None:
+            requested_rounds = max(1, int(total_rounds_override))
+            time_config["minutes_per_round"] = 60
+            time_config["total_simulation_hours"] = requested_rounds
+
+        if active_agent_cap is not None:
+            entity_count = max(1, len(merged.get("agent_configs") or []))
+            cap = min(entity_count, max(1, int(active_agent_cap)))
+            time_config["active_agent_cap"] = cap
+            time_config["agents_per_hour_max"] = min(int(time_config["agents_per_hour_max"] or cap), cap)
+            time_config["agents_per_hour_min"] = min(
+                int(time_config["agents_per_hour_min"] or 1),
+                max(1, math.floor(cap * 0.5)),
+            )
+            time_config["agents_per_hour_min"] = max(
+                1,
+                min(int(time_config["agents_per_hour_min"]), int(time_config["agents_per_hour_max"])),
+            )
+
+        merged["time_config"] = TimeSimulationConfig(**time_config)
+
+        total_rounds = max(
+            1,
+            math.ceil(
+                merged["time_config"].total_simulation_hours * 60 / max(merged["time_config"].minutes_per_round, 1)
+            ),
+        )
+        event_config = asdict(merged["event_config"])
+        scheduled_events: list[dict[str, Any]] = []
+        for event in event_config.get("scheduled_events", []):
+            event_payload = dict(event)
+            try:
+                event_payload["round"] = max(1, min(int(event_payload.get("round") or 1), total_rounds))
+            except (TypeError, ValueError):
+                event_payload["round"] = min(1, total_rounds)
+            scheduled_events.append(event_payload)
+        event_config["scheduled_events"] = scheduled_events
+        merged["event_config"] = EventConfig(**event_config)
         return merged

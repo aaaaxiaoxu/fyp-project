@@ -326,6 +326,35 @@
                   </div>
                 </div>
 
+                <div class="budget-grid">
+                  <label class="budget-card">
+                    <span class="tag-label">TOTAL ROUNDS</span>
+                    <input
+                      v-model="prepareForm.total_rounds"
+                      class="input-field"
+                      type="number"
+                      min="1"
+                      max="240"
+                      inputmode="numeric"
+                      placeholder="Auto from config"
+                    />
+                    <p>Leave blank to keep the generated default. Lower values finish faster.</p>
+                  </label>
+
+                  <label class="budget-card">
+                    <span class="tag-label">ACTIVE AGENT CAP</span>
+                    <input
+                      v-model="prepareForm.active_agent_cap"
+                      class="input-field"
+                      type="number"
+                      min="1"
+                      inputmode="numeric"
+                      placeholder="Auto upper bound"
+                    />
+                    <p>Optional upper bound per round. Lower caps reduce LLM calls and stop latency.</p>
+                  </label>
+                </div>
+
                 <div class="tag-section">
                   <div class="tag-header">
                     <span class="tag-label">ENTITY TYPE FILTER</span>
@@ -433,6 +462,14 @@
                     <div class="info-item">
                       <span class="info-label">Generated</span>
                       <span class="info-value">{{ formatTimestamp(simulationConfig.generated_at) }}</span>
+                    </div>
+                    <div class="info-item">
+                      <span class="info-label">Target Rounds</span>
+                      <span class="info-value">{{ runtimeStatus?.total_rounds || totalRounds }}</span>
+                    </div>
+                    <div class="info-item">
+                      <span class="info-label">Active Cap</span>
+                      <span class="info-value">{{ simulationConfig.time_config.active_agent_cap ?? 'Auto' }}</span>
                     </div>
                     <div class="info-item">
                       <span class="info-label">Hours</span>
@@ -752,6 +789,7 @@ type TimeConfig = {
   minutes_per_round: number
   agents_per_hour_min: number
   agents_per_hour_max: number
+  active_agent_cap?: number | null
 }
 
 type AgentConfig = {
@@ -912,6 +950,8 @@ const prepareForm = reactive({
   use_llm_for_config: true,
   twitter_enabled: true,
   reddit_enabled: true,
+  total_rounds: '',
+  active_agent_cap: '',
 })
 
 const persistedState = reactive<PersistedWorkspaceState>({
@@ -988,6 +1028,10 @@ const platformCards = computed(() => {
 const hotTopics = computed(() => simulationConfig.value?.event_config.hot_topics || [])
 
 const totalRounds = computed(() => {
+  const runtimeRounds = runtimeStatus.value?.total_rounds
+  if (runtimeRounds && runtimeRounds > 0) {
+    return runtimeRounds
+  }
   const timeConfig = simulationConfig.value?.time_config
   if (!timeConfig) {
     return 0
@@ -1194,6 +1238,18 @@ function actionKey(action: SimulationAction, index: number) {
     action.action_type || 'action',
     action.created_at || index,
   ].join(':')
+}
+
+function parseOptionalPositiveInt(value: string, label: string) {
+  const normalized = value.trim()
+  if (!normalized) {
+    return null
+  }
+  const parsed = Number.parseInt(normalized, 10)
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`${label} must be a positive integer.`)
+  }
+  return parsed
 }
 
 function persistWorkspaceState() {
@@ -1795,6 +1851,9 @@ async function startPrepare() {
   addLog('Starting simulation prepare.')
 
   try {
+    const totalRounds = parseOptionalPositiveInt(prepareForm.total_rounds, 'Total rounds')
+    const activeAgentCap = parseOptionalPositiveInt(prepareForm.active_agent_cap, 'Active agent cap')
+
     const response = await apiFetch<TaskResponse>(`/api/simulation/prepare/${selectedProject.value.id}`, {
       method: 'POST',
       body: {
@@ -1803,6 +1862,8 @@ async function startPrepare() {
         use_llm_for_config: prepareForm.use_llm_for_config,
         twitter_enabled: prepareForm.twitter_enabled,
         reddit_enabled: prepareForm.reddit_enabled,
+        total_rounds: totalRounds,
+        active_agent_cap: activeAgentCap,
       },
     })
 
@@ -2330,6 +2391,7 @@ onBeforeUnmount(() => {
 .profile-stats,
 .stats-grid,
 .info-grid,
+.budget-grid,
 .toggle-grid,
 .event-grid,
 .platform-grid,
@@ -2521,11 +2583,32 @@ onBeforeUnmount(() => {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.budget-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .info-item {
   padding: 12px;
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.budget-card {
+  background: #fff;
+  border: 1px solid #e8e8e8;
+  border-radius: 16px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.budget-card p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: #777;
 }
 
 .info-item.full {
@@ -2867,6 +2950,7 @@ onBeforeUnmount(() => {
   .summary-strip,
   .runtime-feed-stats,
   .info-grid,
+  .budget-grid,
   .toggle-grid,
   .platform-grid,
   .event-grid,
