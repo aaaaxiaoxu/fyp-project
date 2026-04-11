@@ -70,11 +70,39 @@ class SimulationRunner:
         self.twitter_actions: list[str] = list(((config.get("twitter_config") or {}).get("available_actions")) or [])
         self.reddit_actions: list[str] = list(((config.get("reddit_config") or {}).get("available_actions")) or [])
         self.initial_posts: list[dict[str, Any]] = list(((config.get("event_config") or {}).get("initial_posts")) or [])
-        self.profiles_by_id: dict[int, dict[str, Any]] = {
+        self.external_profiles_by_id: dict[int, dict[str, Any]] = {
             int(profile.get("user_id") or 0): profile
             for profile in self.profiles
             if isinstance(profile, dict) and profile.get("user_id") is not None
         }
+        # OASIS igraph-backed AgentGraph resolves agents by contiguous vertex index
+        # instead of the original profile/user id, so keep a stable external id for
+        # UI/logging and a zero-based internal id for the runtime itself.
+        self._external_to_internal_agent_id: dict[int, int] = {}
+        self._internal_to_external_agent_id: dict[int, int] = {}
+        self._oasis_agent_configs: list[dict[str, Any]] = []
+        for agent_cfg in self.agent_configs:
+            external_agent_id = int(agent_cfg.get("agent_id") or 0)
+            if external_agent_id <= 0:
+                logger.warning("skipping invalid external agent id %s in simulation %s", external_agent_id, self.simulation_id)
+                continue
+            if external_agent_id in self._external_to_internal_agent_id:
+                logger.warning(
+                    "duplicate external agent id %s in simulation %s; keeping first occurrence",
+                    external_agent_id,
+                    self.simulation_id,
+                )
+                continue
+            internal_agent_id = len(self._oasis_agent_configs)
+            self._external_to_internal_agent_id[external_agent_id] = internal_agent_id
+            self._internal_to_external_agent_id[internal_agent_id] = external_agent_id
+            self._oasis_agent_configs.append(
+                {
+                    **agent_cfg,
+                    "agent_id": internal_agent_id,
+                    "external_agent_id": external_agent_id,
+                }
+            )
 
         # OASIS runtime state — populated by setup()
         self._twitter_env: oasis.environment.env.OasisEnv | None = None
@@ -99,7 +127,7 @@ class SimulationRunner:
 
     async def setup(self) -> None:
         """Build OASIS environments and sign up all agents."""
-        if not self.agent_configs:
+        if not self._oasis_agent_configs:
             logger.warning("no agent_configs in simulation %s — OASIS envs skipped", self.simulation_id)
             return
 
@@ -113,8 +141,8 @@ class SimulationRunner:
                 simulation_id=self.simulation_id,
                 platform=DefaultPlatformType.TWITTER,
                 db_path=str(db_path),
-                agent_configs=self.agent_configs,
-                profiles_by_id=self.profiles_by_id,
+                agent_configs=self._oasis_agent_configs,
+                external_profiles_by_id=self.external_profiles_by_id,
                 available_actions=_parse_action_types(self.twitter_actions),
                 model=model,
             )
@@ -131,8 +159,8 @@ class SimulationRunner:
                 simulation_id=self.simulation_id,
                 platform=DefaultPlatformType.REDDIT,
                 db_path=str(db_path),
-                agent_configs=self.agent_configs,
-                profiles_by_id=self.profiles_by_id,
+                agent_configs=self._oasis_agent_configs,
+                external_profiles_by_id=self.external_profiles_by_id,
                 available_actions=_parse_action_types(self.reddit_actions),
                 model=model,
             )
@@ -169,6 +197,7 @@ class SimulationRunner:
                 platform="twitter",
                 round_number=round_number,
                 initial_posts=self.initial_posts,
+                external_to_internal_agent_id=self._external_to_internal_agent_id,
             )
             try:
                 await self._twitter_env.step(actions_dict)
@@ -192,6 +221,7 @@ class SimulationRunner:
                 platform="reddit",
                 round_number=round_number,
                 initial_posts=self.initial_posts,
+                external_to_internal_agent_id=self._external_to_internal_agent_id,
             )
             try:
                 await self._reddit_env.step(actions_dict)
@@ -227,8 +257,9 @@ class SimulationRunner:
     # ------------------------------------------------------------------
 
     def _trace_to_action(self, row: dict[str, Any], platform: str, round_number: int) -> dict[str, Any]:
-        agent_id = int(row.get("user_id") or 0)
-        profile = self.profiles_by_id.get(agent_id, {})
+        internal_agent_id = int(row.get("user_id") or 0)
+        agent_id = self._internal_to_external_agent_id.get(internal_agent_id, internal_agent_id)
+        profile = self.external_profiles_by_id.get(agent_id, {})
         agent_name = str(profile.get("name") or f"Agent {agent_id}")
         action_type = str(row.get("action") or "").upper()
 
@@ -254,6 +285,7 @@ class SimulationRunner:
             "metadata": {
                 "entity_type": str(profile.get("source_entity_type") or "Entity"),
                 "influence_weight": profile.get("influence_weight"),
+                "internal_agent_id": internal_agent_id,
                 "oasis_info": info,
             },
         }
@@ -270,30 +302,34 @@ async def _setup_platform(
     platform: DefaultPlatformType,
     db_path: str,
     agent_configs: list[dict[str, Any]],
-    profiles_by_id: dict[int, dict[str, Any]],
+    external_profiles_by_id: dict[int, dict[str, Any]],
     available_actions: list[ActionType] | None,
     model: Any,
 ) -> tuple[Any, list[SocialAgent]]:
     agent_graph = AgentGraph()
 
     for agent_cfg in agent_configs:
-        agent_id = int(agent_cfg.get("agent_id") or 0)
-        profile = profiles_by_id.get(agent_id, {})
+        internal_agent_id = int(agent_cfg.get("agent_id") or 0)
+        external_agent_id = int(agent_cfg.get("external_agent_id") or internal_agent_id)
+        profile = external_profiles_by_id.get(external_agent_id, {})
 
-        persona = str(profile.get("persona") or profile.get("bio") or f"Agent {agent_id} in a social simulation.")
-        username = str(profile.get("username") or f"agent_{agent_id}")
+        persona = str(
+            profile.get("persona") or profile.get("bio") or f"Agent {external_agent_id} in a social simulation."
+        )
+        username = str(profile.get("username") or f"agent_{external_agent_id}")
         name = str(profile.get("name") or username)
         bio = str(profile.get("bio") or "Participating in a social simulation.")
+        other_info = _build_oasis_other_info(profile=profile, persona=persona)
 
         user_info = UserInfo(
             user_name=username,
             name=name,
             description=bio,
-            profile={"other_info": {"user_profile": persona}},
+            profile={"other_info": other_info},
             recsys_type=platform.value,
         )
         agent = SocialAgent(
-            agent_id=agent_id,
+            agent_id=internal_agent_id,
             user_info=user_info,
             model=model,
             agent_graph=agent_graph,
@@ -318,16 +354,18 @@ def _build_actions_dict(
     platform: str,
     round_number: int,
     initial_posts: list[dict[str, Any]],
+    external_to_internal_agent_id: dict[int, int],
 ) -> dict[SocialAgent, LLMAction | ManualAction]:
     # Build a map of agent_id → initial post content for round 1
     initial_by_agent: dict[int, str] = {}
     if round_number == 1:
         for post in initial_posts:
             if str(post.get("platform") or "") == platform:
-                agent_id = int(post.get("poster_agent_id") or 0)
+                external_agent_id = int(post.get("poster_agent_id") or 0)
                 content = str(post.get("content") or "").strip()
-                if agent_id and content:
-                    initial_by_agent[agent_id] = content
+                internal_agent_id = external_to_internal_agent_id.get(external_agent_id)
+                if internal_agent_id is not None and content:
+                    initial_by_agent[internal_agent_id] = content
 
     actions: dict[SocialAgent, LLMAction | ManualAction] = {}
     for agent in agents:
@@ -392,6 +430,26 @@ def _parse_action_types(action_names: list[str]) -> list[ActionType] | None:
             except ValueError:
                 logger.warning("unknown OASIS action type: %s", name)
     return result if result else None
+
+
+def _build_oasis_other_info(*, profile: dict[str, Any], persona: str) -> dict[str, Any]:
+    age_value = profile.get("age")
+    if isinstance(age_value, (int, float)) and age_value > 0:
+        age = int(age_value)
+    else:
+        age = 35
+
+    gender = str(profile.get("gender") or "person")
+    country = str(profile.get("country") or "China")
+    mbti = str(profile.get("mbti") or "ISFJ")
+
+    return {
+        "user_profile": persona,
+        "gender": gender,
+        "age": age,
+        "mbti": mbti,
+        "country": country,
+    }
 
 
 def _try_delete(path: Path) -> None:
